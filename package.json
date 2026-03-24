@@ -1,0 +1,9 @@
+{
+  "name": "10jqka-hot-themes-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "每 10 分钟抓取同花顺首页热门主题的零依赖 Web 工具",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

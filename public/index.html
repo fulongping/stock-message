@@ -1,0 +1,289 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>投资主题、收盘复盘与微信观点信号面板</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <p class="eyebrow">Market Signal Console</p>
+        <h1>同花顺热主题 + 收盘复盘 + 微信观点信号</h1>
+        <p class="hero-copy">
+          每 10 分钟抓取同花顺首页热主题，同时只统计 60 和 00 打头的沪深主板股票。
+          市场榜单在 9:30-11:30、13:00-15:00 内按 5 分钟整点运行，整 15 分钟节点切换显示过去 15 分钟的主榜，其余节点显示当前 5 分钟主榜。
+          收盘后会继续基于同花顺前五热门主题、题材成分股和日线数据，筛出符合你模式的 5 只股票。页面下半部分继续扫描导入的微信群与公众号文本，用于判断讨论更偏科技线还是战争线。
+        </p>
+      </header>
+
+      <section class="dashboard-section">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Part 1</p>
+            <h2>同花顺热主题与区间涨幅</h2>
+          </div>
+          <button id="refreshHotButton" class="refresh-button" type="button">刷新同花顺</button>
+        </div>
+
+        <section class="panel status-panel">
+          <div class="status-row">
+            <div>
+              <p class="panel-label">抓取状态</p>
+              <span id="hotStatusBadge" class="status-badge">加载中</span>
+            </div>
+            <div>
+              <p class="panel-label">下次刷新</p>
+              <span id="hotCountdownText" class="muted">准备初始化</span>
+            </div>
+          </div>
+
+          <div class="meta-grid">
+            <div class="meta-item">
+              <span class="panel-label">最近成功</span>
+              <strong id="hotLastSuccessText">--</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">最近请求</span>
+              <strong id="hotLastAttemptText">--</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">数据源</span>
+              <a id="sourceLink" href="https://www.10jqka.com.cn/" target="_blank" rel="noreferrer">
+                同花顺官网首页
+              </a>
+            </div>
+          </div>
+        </section>
+
+        <section id="themesGrid" class="themes-grid" aria-live="polite"></section>
+        <section id="hotErrorPanel" class="panel error-panel hidden"></section>
+
+        <section class="panel market-panel">
+          <div class="subsection-head">
+            <div>
+              <h3>上一轮区间涨幅前十</h3>
+              <p class="panel-caption">只保留 60 / 00 主板股票，自动统计时段为 9:30-11:30、13:00-15:00，整 15 分钟节点显示过去 15 分钟榜</p>
+            </div>
+            <div class="status-row compact">
+              <span id="marketStatusBadge" class="status-badge">加载中</span>
+              <span id="marketCountdownText" class="muted">准备初始化</span>
+            </div>
+          </div>
+
+          <div class="meta-grid four">
+            <div class="meta-item">
+              <span class="panel-label">覆盖股票数</span>
+              <strong id="marketCoverageText">0</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">对比窗口</span>
+              <strong id="marketWindowText">--</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">快照起点</span>
+              <strong id="marketStartText">--</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">快照终点</span>
+              <strong id="marketEndText">--</strong>
+            </div>
+          </div>
+        </section>
+
+        <section id="marketErrorPanel" class="panel error-panel hidden"></section>
+
+        <div class="content-grid market-content-grid">
+          <section class="panel summary-panel">
+            <div class="subsection-head">
+              <h3>区间摘要</h3>
+            </div>
+            <ul id="marketSummaryList" class="summary-list"></ul>
+          </section>
+
+          <section class="panel groups-panel">
+            <div class="subsection-head">
+              <h3>概念分类</h3>
+            </div>
+            <div id="marketGroupsGrid" class="leader-groups-grid"></div>
+          </section>
+        </div>
+
+        <section class="panel market-stocks-panel">
+          <div class="subsection-head">
+            <h3>前十股票明细</h3>
+          </div>
+          <div id="marketLeadersGrid" class="market-leaders-grid"></div>
+        </section>
+
+        <section class="panel market-stocks-panel">
+          <div class="subsection-head">
+            <div>
+              <h3>当日 5 分钟历史</h3>
+              <p id="marketModeText" class="panel-caption">当前主榜：--</p>
+            </div>
+            <span id="marketHistoryCountText" class="muted">0 个区间</span>
+          </div>
+          <div id="marketHistoryGrid" class="leader-groups-grid"></div>
+        </section>
+
+        <section class="panel market-panel">
+          <div class="subsection-head">
+            <div>
+              <h3>收盘复盘与模式内 5 只</h3>
+              <p class="panel-caption">交易日 15:05 后自动从同花顺前五热门主题里筛选，规则为底部放量至少三天、沿 MA5 上行、且没有连续两天跌破 MA5</p>
+            </div>
+            <div class="status-row compact">
+              <span id="patternStatusBadge" class="status-badge">加载中</span>
+              <span id="patternCountdownText" class="muted">准备初始化</span>
+            </div>
+          </div>
+
+          <div class="meta-grid four">
+            <div class="meta-item">
+              <span class="panel-label">复盘日期</span>
+              <strong id="patternDayText">--</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">热主题数</span>
+              <strong id="patternThemeCountText">0</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">严格候选</span>
+              <strong id="patternMatchCountText">0</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">最近成功</span>
+              <strong id="patternLastSuccessText">--</strong>
+            </div>
+          </div>
+        </section>
+
+        <section id="patternWarningPanel" class="panel warning-panel hidden"></section>
+        <section id="patternErrorPanel" class="panel error-panel hidden"></section>
+
+        <div class="content-grid market-content-grid">
+          <section class="panel summary-panel">
+            <div class="subsection-head">
+              <h3>收盘摘要</h3>
+            </div>
+            <ul id="patternSummaryList" class="summary-list"></ul>
+          </section>
+
+          <section class="panel groups-panel">
+            <div class="subsection-head">
+              <h3>前五热门主题</h3>
+            </div>
+            <div id="patternThemesGrid" class="leader-groups-grid"></div>
+          </section>
+        </div>
+
+        <section class="panel market-stocks-panel">
+          <div class="subsection-head">
+            <h3>模式内 5 只股票</h3>
+          </div>
+          <div id="patternPicksGrid" class="market-leaders-grid"></div>
+        </section>
+      </section>
+
+      <section class="dashboard-section">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Part 2</p>
+            <h2>微信观点信号</h2>
+          </div>
+          <button id="refreshSignalButton" class="refresh-button" type="button">重新分析</button>
+        </div>
+
+        <section class="panel signal-panel">
+          <div class="signal-hero">
+            <div>
+              <p class="panel-label">分析状态</p>
+              <div class="status-row compact">
+                <span id="signalStatusBadge" class="status-badge">加载中</span>
+                <span id="signalCountdownText" class="muted">准备初始化</span>
+              </div>
+            </div>
+
+            <div class="bias-card">
+              <p class="panel-label">当前判断</p>
+              <div class="bias-main">
+                <strong id="biasText" class="bias-badge neutral">--</strong>
+                <span id="confidenceText" class="muted">--</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="score-grid">
+            <article class="score-card tech">
+              <span class="score-label">科技线分数</span>
+              <strong id="techScoreText">0</strong>
+              <p id="techKeywordsText" class="score-copy">暂无明显高频词</p>
+            </article>
+            <article class="score-card war">
+              <span class="score-label">战争线分数</span>
+              <strong id="warScoreText">0</strong>
+              <p id="warKeywordsText" class="score-copy">暂无明显高频词</p>
+            </article>
+          </div>
+
+          <div class="meta-grid four">
+            <div class="meta-item">
+              <span class="panel-label">导入目录</span>
+              <strong id="importDirText">--</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">导入文件数</span>
+              <strong id="importFileCountText">0</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">最近成功</span>
+              <strong id="signalLastSuccessText">--</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">最近请求</span>
+              <strong id="signalLastAttemptText">--</strong>
+            </div>
+          </div>
+        </section>
+
+        <section id="warningPanel" class="panel warning-panel hidden"></section>
+        <section id="signalErrorPanel" class="panel error-panel hidden"></section>
+
+        <div class="content-grid">
+          <section class="panel summary-panel">
+            <div class="subsection-head">
+              <h3>综合判断</h3>
+              <span id="analyzedCountText" class="muted">0 条群消息</span>
+            </div>
+            <ul id="summaryList" class="summary-list"></ul>
+          </section>
+
+          <section class="panel speakers-panel">
+            <div class="subsection-head">
+              <h3>重点发言人</h3>
+            </div>
+            <div id="speakerGrid" class="speaker-grid"></div>
+          </section>
+
+          <section class="panel messages-panel">
+            <div class="subsection-head">
+              <h3>最新群消息</h3>
+            </div>
+            <div id="recentMessagesList" class="timeline-list"></div>
+          </section>
+
+          <section class="panel articles-panel">
+            <div class="subsection-head">
+              <h3>最近公众号文章</h3>
+            </div>
+            <div id="recentArticlesList" class="timeline-list"></div>
+          </section>
+        </div>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
