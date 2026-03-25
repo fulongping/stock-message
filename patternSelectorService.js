@@ -596,95 +596,100 @@ function countNearOrAboveMa5(bars) {
   return bars.filter((bar) => Number.isFinite(bar.ma5) && bar.close >= bar.ma5 * (1 - MA_TOLERANCE_RATIO)).length;
 }
 
-function findBottomVolumeRun(bars) {
-  const recent = bars.slice(-15);
-  let bestRun = null;
-  const endCandidates = [recent.length - 1, recent.length - 2, recent.length - 3, recent.length - 4].filter((index) => index >= 2);
+function average(values) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return null;
+  }
 
-  for (const endIndex of endCandidates) {
-    const minStartIndex = Math.max(0, endIndex - 7);
+  const total = values.reduce((sum, value) => sum + value, 0);
+  return total / values.length;
+}
 
-    for (let startIndex = minStartIndex; startIndex <= endIndex - 2; startIndex += 1) {
-      const run = recent.slice(startIndex, endIndex + 1);
-      let risingClose = true;
-      let volumeStrictIncreases = 0;
-      let volumeTrendOk = true;
+function calculateVolumeTrendMetrics(bars) {
+  const recent10 = bars.slice(-10);
+  const recent20 = bars.slice(-20);
+  const volume5Avg = average(recent10.slice(-5).map((bar) => bar.volume));
+  const volume10Avg = average(recent10.map((bar) => bar.volume));
+  const volume20Avg = average(recent20.map((bar) => bar.volume));
+  const volumeSupportDays = Number.isFinite(volume20Avg)
+    ? recent10.filter((bar) => bar.volume >= volume20Avg * 1.02).length
+    : 0;
+  const higherVolumeDays = recent10.slice(1).filter((bar, index) => bar.volume >= recent10[index].volume * 0.95).length;
+  const volumeCenterLiftPercent = Number.isFinite(volume10Avg) && Number.isFinite(volume20Avg) && volume20Avg > 0
+    ? ((volume10Avg - volume20Avg) / volume20Avg) * 100
+    : null;
+  const shortVolumeLiftPercent = Number.isFinite(volume5Avg) && Number.isFinite(volume10Avg) && volume10Avg > 0
+    ? ((volume5Avg - volume10Avg) / volume10Avg) * 100
+    : null;
 
-      for (let index = 1; index < run.length; index += 1) {
-        if (!(run[index].close > run[index - 1].close)) {
-          risingClose = false;
-          break;
-        }
+  return {
+    higherVolumeDays,
+    volume10Avg,
+    volume20Avg,
+    volume5Avg,
+    volumeCenterLiftPercent,
+    volumeSupportDays,
+    shortVolumeLiftPercent,
+  };
+}
 
-        if (run[index].volume < run[index - 1].volume * 0.9) {
-          volumeTrendOk = false;
-          break;
-        }
+function calculateTrendProgressMetrics(bars) {
+  const recent10 = bars.slice(-10);
+  const recent20 = bars.slice(-20);
+  let advanceDays = recent10.length > 0 ? 1 : 0;
+  let pullbackDays = 0;
 
-        if (run[index].volume > run[index - 1].volume * 1.02) {
-          volumeStrictIncreases += 1;
-        }
-      }
-
-      if (!risingClose || !volumeTrendOk || volumeStrictIncreases < Math.max(2, run.length - 2)) {
-        continue;
-      }
-
-      const absoluteStartIndex = bars.length - recent.length + startIndex;
-      const floorWindow = bars.slice(Math.max(0, absoluteStartIndex - 15), absoluteStartIndex + 1);
-      const floorLow = Math.min(...floorWindow.map((item) => item.low));
-
-      if (!(run[0].low <= floorLow * 1.06)) {
-        continue;
-      }
-
-      const runReturnPercent = ((run[run.length - 1].close - run[0].close) / run[0].close) * 100;
-      const volumeExpandPercent = run[0].volume > 0
-        ? ((run[run.length - 1].volume - run[0].volume) / run[0].volume) * 100
-        : 0;
-      const lastBar = bars[bars.length - 1];
-      const bottomDistancePercent = floorLow > 0
-        ? ((lastBar.close - floorLow) / floorLow) * 100
-        : null;
-      const candidate = {
-        bottomDistancePercent,
-        endAt: run[run.length - 1].date,
-        endIndex: absoluteStartIndex + run.length - 1,
-        runLength: run.length,
-        runReturnPercent,
-        startAt: run[0].date,
-        startIndex: absoluteStartIndex,
-        volumeExpandPercent,
-      };
-
-      if (!bestRun
-        || candidate.runLength > bestRun.runLength
-        || (candidate.runLength === bestRun.runLength && candidate.runReturnPercent > bestRun.runReturnPercent)
-        || (candidate.runLength === bestRun.runLength && candidate.runReturnPercent === bestRun.runReturnPercent && candidate.endIndex > bestRun.endIndex)) {
-        bestRun = candidate;
-      }
+  for (let index = 1; index < recent10.length; index += 1) {
+    if (recent10[index].close >= recent10[index - 1].close * 0.995) {
+      advanceDays += 1;
+    } else {
+      pullbackDays += 1;
     }
   }
 
-  return bestRun;
+  const startBar = recent10[0];
+  const lastBar = recent10[recent10.length - 1];
+  const baseLow = recent20.length > 0 ? Math.min(...recent20.map((bar) => bar.low)) : null;
+  const trendReturnPercent = startBar && lastBar && startBar.close > 0
+    ? ((lastBar.close - startBar.close) / startBar.close) * 100
+    : null;
+  const bottomLiftPercent = Number.isFinite(baseLow) && baseLow > 0 && lastBar
+    ? ((lastBar.close - baseLow) / baseLow) * 100
+    : null;
+
+  return {
+    advanceDays,
+    bottomLiftPercent,
+    pullbackDays,
+    trendReturnPercent,
+  };
 }
 
 function buildPickReasons(metrics) {
   const reasons = [];
 
-  if (metrics.runDays >= 3) {
-    reasons.push(`最近 ${metrics.runDays} 天收盘连升，量能放大 ${roundNumber(metrics.volumeExpandPercent, 1)}%。`);
+  if (Number.isFinite(metrics.volumeCenterLiftPercent)) {
+    reasons.push(`近 10 日量能中枢抬升 ${roundNumber(metrics.volumeCenterLiftPercent, 1)}%，量能支撑日有 ${metrics.volumeSupportDays} 天。`);
   }
 
   if (Number.isFinite(metrics.aboveMa5Percent)) {
     if (metrics.aboveMa5Percent >= 0) {
-      reasons.push(`最新收盘高于 MA5 ${roundNumber(metrics.aboveMa5Percent, 2)}%。`);
+      reasons.push(`最新收盘高于 MA5 ${roundNumber(metrics.aboveMa5Percent, 2)}%，5 日线斜率 ${roundNumber(metrics.maSlopePercent, 2)}%。`);
     } else {
-      reasons.push(`最新收盘贴近 MA5，偏离 ${roundNumber(Math.abs(metrics.aboveMa5Percent), 2)}%。`);
+      reasons.push(`最新收盘回踩 MA5 ${roundNumber(Math.abs(metrics.aboveMa5Percent), 2)}%，但仍维持趋势。`);
     }
   }
 
-  reasons.push(`最近 ${metrics.recentWindowLength} 天没有连续 2 天跌破 MA5。`);
+  reasons.push(`最近 ${metrics.recentWindowLength} 天里有 ${metrics.recentAboveCount} 天贴着 MA5 运行，没有连续 2 天跌破。`);
+
+  if (Number.isFinite(metrics.trendReturnPercent) && Number.isFinite(metrics.bottomLiftPercent)) {
+    reasons.push(`近 10 日趋势推进 ${roundNumber(metrics.trendReturnPercent, 2)}%，离近 20 日低点 ${roundNumber(metrics.bottomLiftPercent, 2)}%，期间震荡换手 ${metrics.pullbackDays || 0} 天。`);
+  }
+
+  if (metrics.stableTrendRide) {
+    reasons.push('量能铺垫时间更长，虽然中途有一次额外震荡，但整体仍沿 MA5 稳定推进。');
+  }
+
   reasons.push(`热门主题匹配：${metrics.matchedThemes.join('、')}。`);
   return reasons;
 }
@@ -699,9 +704,9 @@ function evaluatePatternCandidate(candidate) {
   }
 
   const bars = addMa5(candidate.bars);
-  const recentBars = bars.slice(-8).filter((item) => Number.isFinite(item.ma5));
+  const recentBars = bars.slice(-10).filter((item) => Number.isFinite(item.ma5));
   const lastBar = bars[bars.length - 1];
-  const maReferenceBar = bars[bars.length - 4] || bars[bars.length - 1];
+  const maReferenceBar = bars[bars.length - 5] || bars[bars.length - 1];
   const aboveMa5Percent = Number.isFinite(lastBar.ma5) && lastBar.ma5 !== 0
     ? ((lastBar.close - lastBar.ma5) / lastBar.ma5) * 100
     : null;
@@ -710,42 +715,108 @@ function evaluatePatternCandidate(candidate) {
     : 0;
   const maxBelowStreak = getMaxConsecutiveBelowMa5(recentBars);
   const nearAboveCount = countNearOrAboveMa5(recentBars);
-  const run = findBottomVolumeRun(bars);
-  const passMa = recentBars.length >= 5
+  const volumeMetrics = calculateVolumeTrendMetrics(bars);
+  const progressMetrics = calculateTrendProgressMetrics(bars);
+  const passMa = recentBars.length >= 8
     && maxBelowStreak < 2
-    && nearAboveCount >= Math.max(recentBars.length - 4, 4)
-    && maSlopePercent > 0
+    && nearAboveCount >= Math.max(recentBars.length - 3, 6)
+    && maSlopePercent > 0.5
+    && maSlopePercent <= 12
     && lastBar.close >= lastBar.ma5 * (1 - MA_TOLERANCE_RATIO);
-  const passed = Boolean(run) && passMa;
+  const passVolume = Number.isFinite(volumeMetrics.volumeCenterLiftPercent)
+    && volumeMetrics.volumeCenterLiftPercent >= 5
+    && volumeMetrics.volumeSupportDays >= 4;
+  const strictStructure = Number.isFinite(progressMetrics.trendReturnPercent)
+    && progressMetrics.trendReturnPercent >= 5
+    && progressMetrics.trendReturnPercent <= 40
+    && Number.isFinite(progressMetrics.bottomLiftPercent)
+    && progressMetrics.bottomLiftPercent >= 8
+    && progressMetrics.bottomLiftPercent <= 55
+    && progressMetrics.pullbackDays <= 3;
+  const stableTrendRide = recentBars.length >= 8
+    && maxBelowStreak === 0
+    && nearAboveCount >= Math.max(recentBars.length - 1, 8)
+    && Number.isFinite(aboveMa5Percent)
+    && aboveMa5Percent >= 0
+    && aboveMa5Percent <= 10
+    && maSlopePercent >= 1.5
+    && maSlopePercent <= 10
+    && Number.isFinite(progressMetrics.trendReturnPercent)
+    && progressMetrics.trendReturnPercent >= 8
+    && progressMetrics.trendReturnPercent <= 30
+    && Number.isFinite(progressMetrics.bottomLiftPercent)
+    && progressMetrics.bottomLiftPercent >= 12
+    && progressMetrics.bottomLiftPercent <= 60
+    && progressMetrics.pullbackDays <= 4
+    && volumeMetrics.volumeSupportDays >= 6;
+  const passDeviation = Number.isFinite(aboveMa5Percent)
+    && aboveMa5Percent >= -1
+    && (aboveMa5Percent <= 8.5 || stableTrendRide);
+  const passStructure = strictStructure || stableTrendRide;
+  const nearTrendCandidate = recentBars.length >= 8
+    && maxBelowStreak < 2
+    && nearAboveCount >= Math.max(recentBars.length - 3, 6)
+    && maSlopePercent > 0
+    && maSlopePercent <= 15
+    && Number.isFinite(aboveMa5Percent)
+    && aboveMa5Percent >= -2
+    && aboveMa5Percent <= 10
+    && Number.isFinite(progressMetrics.trendReturnPercent)
+    && progressMetrics.trendReturnPercent >= 3
+    && progressMetrics.trendReturnPercent <= 45
+    && Number.isFinite(progressMetrics.bottomLiftPercent)
+    && progressMetrics.bottomLiftPercent >= 5
+    && progressMetrics.bottomLiftPercent <= 70
+    && progressMetrics.pullbackDays <= 4
+    && ((Number.isFinite(volumeMetrics.volumeCenterLiftPercent) && volumeMetrics.volumeCenterLiftPercent >= 0)
+      || volumeMetrics.volumeSupportDays >= 3);
+  const passTrendPush = nearTrendCandidate
+    && Number.isFinite(aboveMa5Percent)
+    && aboveMa5Percent <= 6.5
+    && maSlopePercent <= 10;
+  const passed = passDeviation && passVolume && passStructure && (passMa || passTrendPush);
   const themeScore = candidate.themeRankScore || 0;
   const dailyChangePercent = Number.isFinite(candidate.dailyChangePercent)
     ? candidate.dailyChangePercent
     : getDailyChangePercent(lastBar);
-  const score = (themeScore * 6)
-    + ((run?.runLength || 0) * 5)
-    + (run?.runReturnPercent || 0)
-    + ((run?.volumeExpandPercent || 0) / 12)
-    + Math.max(aboveMa5Percent || 0, 0)
-    + (dailyChangePercent || 0);
+  const deviationPenalty = Number.isFinite(aboveMa5Percent)
+    ? Math.abs(aboveMa5Percent - 5)
+    : 20;
+  const score = (themeScore * 8)
+    + (nearAboveCount * 4)
+    + ((volumeMetrics.volumeSupportDays || 0) * 3)
+    + Math.min(progressMetrics.trendReturnPercent || 0, 25)
+    + ((volumeMetrics.volumeCenterLiftPercent || 0) / 2)
+    + (dailyChangePercent || 0)
+    - (deviationPenalty * 2)
+    - (Math.max(maSlopePercent - 8, 0) * 1.5)
+    - (Math.max((progressMetrics.bottomLiftPercent || 0) - 45, 0) * 0.6);
 
   const metrics = {
     aboveMa5Percent: roundNumber(aboveMa5Percent, 2),
+    bottomLiftPercent: roundNumber(progressMetrics.bottomLiftPercent, 2),
     close: roundNumber(lastBar.close, 3),
     dailyChangePercent: roundNumber(dailyChangePercent, 2),
     ma5: roundNumber(lastBar.ma5, 3),
     maSlopePercent: roundNumber(maSlopePercent, 2),
     matchedThemes: candidate.matchedThemes,
     maxBelowMa5Streak: maxBelowStreak,
+    nearTrendCandidate,
+    pullbackDays: progressMetrics.pullbackDays,
     recentAboveCount: nearAboveCount,
     recentWindowLength: recentBars.length,
-    runDays: run?.runLength || 0,
-    runEndDate: run?.endAt || null,
-    runReturnPercent: roundNumber(run?.runReturnPercent || 0, 2),
-    runStartDate: run?.startAt || null,
+    runDays: progressMetrics.advanceDays || 0,
+    runReturnPercent: roundNumber(progressMetrics.trendReturnPercent || 0, 2),
     score: roundNumber(score, 2),
+    stableTrendRide,
     themeRankScore: themeScore,
     turnoverRate: roundNumber(candidate.turnoverRate, 2),
-    volumeExpandPercent: roundNumber(run?.volumeExpandPercent || 0, 1),
+    volume10Avg: roundNumber(volumeMetrics.volume10Avg, 0),
+    volume20Avg: roundNumber(volumeMetrics.volume20Avg, 0),
+    volume5Avg: roundNumber(volumeMetrics.volume5Avg, 0),
+    volumeCenterLiftPercent: roundNumber(volumeMetrics.volumeCenterLiftPercent, 1),
+    volumeExpandPercent: roundNumber(volumeMetrics.volumeCenterLiftPercent || 0, 1),
+    volumeSupportDays: volumeMetrics.volumeSupportDays,
   };
 
   return {
@@ -951,7 +1022,7 @@ function buildWaitingSummary(referenceDate = new Date()) {
   return [
     `收盘复盘会在交易日 ${pad2(closeTime.getHours())}:${pad2(closeTime.getMinutes())} 后生成。`,
     '筛选范围只保留 00 / 60 开头股票，并且要求属于同花顺当日前五大热门主题。',
-    '模式条件为：底部起来放量至少三天、基本沿 MA5 上行、最近没有连续两天跌破 MA5。',
+    '模式条件为：近 10 日量能中枢抬升、沿 MA5 稳定推进、允许少量震荡换手，但最近没有连续两天跌破 MA5，且收盘不要离 5 日线太远。',
   ];
 }
 
@@ -973,7 +1044,7 @@ function buildSummary(context) {
   }
 
   lines.push(`前五热门主题共整理出 ${context.themeMemberCount} 只 00 / 60 主板成分股，并优先评估其中 ${context.candidateCount} 只。`);
-  lines.push(`严格满足“底部放量至少三天 + 沿 MA5 上行 + 最近没有连续两天跌破 MA5”的股票共有 ${context.strictMatchCount} 只，当前展示前 ${context.finalPickCount} 只。`);
+  lines.push(`严格满足“量能中枢抬升 + 沿 MA5 稳定推进 + 允许少量震荡换手 + 乖离不过大”的股票共有 ${context.strictMatchCount} 只，当前展示前 ${context.finalPickCount} 只。`);
 
   if (context.marketOverview.available && context.marketOverview.latestLeaders.length > 0) {
     const names = context.marketOverview.latestLeaders
@@ -1071,14 +1142,7 @@ async function refreshPatternPicks(options = {}) {
         .filter((item) => item
           && !item.error
           && !selectedCodes.has(item.code)
-          && item.maxBelowMa5Streak < 2
-          && item.recentAboveCount >= Math.max(item.recentWindowLength - 4, 4)
-          && item.maSlopePercent > -0.5
-          && (
-            (item.runDays || 0) >= 2
-            || (item.runReturnPercent || 0) >= 4
-            || ((item.aboveMa5Percent || -100) >= -2 && (item.maSlopePercent || 0) > 0)
-          ))
+          && item.nearTrendCandidate)
         .sort((left, right) => {
           if ((right.themeRankScore || 0) !== (left.themeRankScore || 0)) {
             return (right.themeRankScore || 0) - (left.themeRankScore || 0);
@@ -1094,10 +1158,38 @@ async function refreshPatternPicks(options = {}) {
         .slice(0, Math.max(0, TOP_PICK_COUNT - strictPicks.length))
         .map((item) => ({
           ...item,
-          reasons: ['严格候选不足，当前按热门主题内最接近模式的 MA5 走势补位。', ...(item.reasons || [])],
+          reasons: ['严格候选不足，当前按热门主题内最接近模式的趋势推进形态补位。', ...(item.reasons || [])],
           selectionMode: 'fallback',
         }));
-      const picks = [...strictPicks, ...fallbackPicks]
+      const fallbackCodes = new Set([...selectedCodes, ...fallbackPicks.map((item) => item.code)]);
+      const reserveMatches = evaluationResults
+        .filter((item) => item
+          && !item.error
+          && !fallbackCodes.has(item.code)
+          && item.maxBelowMa5Streak < 2
+          && item.recentAboveCount >= Math.max(item.recentWindowLength - 4, 4)
+          && (item.maSlopePercent || 0) > 0)
+        .sort((left, right) => {
+          if ((right.themeRankScore || 0) !== (left.themeRankScore || 0)) {
+            return (right.themeRankScore || 0) - (left.themeRankScore || 0);
+          }
+
+          const leftDeviation = Math.abs((left.aboveMa5Percent ?? 99) - 5);
+          const rightDeviation = Math.abs((right.aboveMa5Percent ?? 99) - 5);
+          if (leftDeviation !== rightDeviation) {
+            return leftDeviation - rightDeviation;
+          }
+
+          return (right.score || 0) - (left.score || 0);
+        });
+      const reservePicks = reserveMatches
+        .slice(0, Math.max(0, TOP_PICK_COUNT - strictPicks.length - fallbackPicks.length))
+        .map((item) => ({
+          ...item,
+          reasons: ['趋势推进候选仍不足，当前按同主题里 MA5 最顺的备选形态补位。', ...(item.reasons || [])],
+          selectionMode: 'reserve',
+        }));
+      const picks = [...strictPicks, ...fallbackPicks, ...reservePicks]
         .slice(0, TOP_PICK_COUNT)
         .map((item, index) => ({
           ...item,
@@ -1115,7 +1207,11 @@ async function refreshPatternPicks(options = {}) {
       }
 
       if (strictMatches.length < TOP_PICK_COUNT && fallbackPicks.length > 0) {
-        warnings.push(`严格满足当前规则的股票只有 ${strictMatches.length} 只，剩余 ${fallbackPicks.length} 只按最接近模式补位。`);
+        warnings.push(`严格满足当前规则的股票只有 ${strictMatches.length} 只，剩余 ${fallbackPicks.length} 只按最接近的趋势推进形态补位。`);
+      }
+
+      if (reservePicks.length > 0) {
+        warnings.push(`趋势推进候选仍不足，另补了 ${reservePicks.length} 只 MA5 更顺的备选形态。`);
       } else if (picks.length < TOP_PICK_COUNT) {
         warnings.push(`严格满足当前规则的股票只有 ${picks.length} 只。`);
       }
@@ -1236,6 +1332,4 @@ module.exports = {
   refreshPatternPicks,
   startPatternPicksPolling,
 };
-
-
 
