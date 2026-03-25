@@ -118,6 +118,7 @@ let pollingStarted = false;
 let inFlightRefresh = null;
 let cacheLoaded = false;
 let cacheLoadPromise = null;
+let nextRefreshTimer = null;
 
 function cloneState() {
   return JSON.parse(JSON.stringify(state));
@@ -185,6 +186,30 @@ function isAfterCloseReady(referenceDate = new Date()) {
 function syncSchedule(referenceDate = new Date()) {
   state.intervalMs = POLL_INTERVAL_MS;
   state.nextRefreshAt = getNextTradingCloseTime(referenceDate).toISOString();
+}
+
+function buildSummaryFromState() {
+  return buildSummary({
+    backtest: state.backtest,
+    candidateCount: state.filterCounts.candidateCount,
+    finalPickCount: state.filterCounts.finalPickCount,
+    marketOverview: state.marketOverview,
+    strictMatchCount: state.filterCounts.strictMatchCount,
+    themeMemberCount: state.filterCounts.themeMemberCount,
+    topThemes: state.topThemes,
+  });
+}
+
+function normalizeReadyState(referenceDate = new Date()) {
+  const lastSuccessDay = state.lastSuccessAt ? formatTradingDay(new Date(state.lastSuccessAt)) : null;
+  if (!isAfterCloseReady(referenceDate) || lastSuccessDay !== state.day || state.picks.length === 0) {
+    return false;
+  }
+
+  state.status = 'ready';
+  state.error = null;
+  state.summary = buildSummaryFromState();
+  return true;
 }
 
 function resetDailyState(dayKey) {
@@ -1709,6 +1734,8 @@ async function getPatternPicksSnapshot(options = {}) {
     return cloneState();
   }
 
+  normalizeReadyState(now);
+
   if (hydrateIfEmpty) {
     const lastSuccessDay = state.lastSuccessAt ? formatTradingDay(new Date(state.lastSuccessAt)) : null;
     const lastAttemptTime = state.lastAttemptAt ? Date.parse(state.lastAttemptAt) : 0;
@@ -1720,6 +1747,35 @@ async function getPatternPicksSnapshot(options = {}) {
   }
 
   return cloneState();
+}
+
+function scheduleNextPatternPicksRefresh() {
+  if (!pollingStarted) {
+    return;
+  }
+
+  if (nextRefreshTimer) {
+    clearTimeout(nextRefreshTimer);
+  }
+
+  const now = new Date();
+  ensureTradingDayState(now);
+  pruneCaches(state.day);
+  syncSchedule(now);
+
+  const nextRefreshAt = getNextTradingCloseTime(now);
+  state.nextRefreshAt = nextRefreshAt.toISOString();
+  const delay = Math.max(nextRefreshAt.getTime() - Date.now(), 1000);
+
+  nextRefreshTimer = setTimeout(() => {
+    refreshPatternPicks({ force: true })
+      .catch((error) => {
+        console.warn('Scheduled pattern picks refresh failed:', error.message);
+      })
+      .finally(() => {
+        scheduleNextPatternPicksRefresh();
+      });
+  }, delay);
 }
 
 function startPatternPicksPolling() {
@@ -1743,7 +1799,10 @@ function startPatternPicksPolling() {
         }
       }
 
-      state.status = isAfterCloseReady(now) && state.picks.length > 0 ? 'ready' : 'idle';
+      if (!normalizeReadyState(now)) {
+        state.status = 'idle';
+      }
+
       if (state.summary.length === 0) {
         state.summary = buildWaitingSummary(now);
       }
@@ -1751,13 +1810,10 @@ function startPatternPicksPolling() {
     })
     .catch((error) => {
       console.warn('Initial pattern picks refresh failed:', error.message);
+    })
+    .finally(() => {
+      scheduleNextPatternPicksRefresh();
     });
-
-  setInterval(() => {
-    refreshPatternPicks().catch((error) => {
-      console.warn('Scheduled pattern picks refresh failed:', error.message);
-    });
-  }, POLL_INTERVAL_MS);
 }
 
 module.exports = {

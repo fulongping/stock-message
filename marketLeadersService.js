@@ -1605,7 +1605,10 @@ async function getMarketLeadersSnapshot(options = {}) {
   if (!isTradingSessionOpen(now)) {
     state.error = null;
     state.status = state.lastSuccessAt ? 'stale' : 'idle';
-    state.summary = buildOutOfSessionSummary(state.comparisonReady || state.leaders.length > 0, state.history.length);
+    state.summary = appendRotationInsightSummary(
+      buildOutOfSessionSummary(state.comparisonReady || state.leaders.length > 0, state.history.length),
+      state.rotationInsights,
+    );
     return cloneState();
   }
 
