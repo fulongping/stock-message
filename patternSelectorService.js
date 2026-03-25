@@ -7,7 +7,7 @@ const { fetchMarketSnapshot, getMarketLeadersSnapshot } = require('./marketLeade
 const POLL_INTERVAL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20 * 1000;
 const EMPTY_STATE_RETRY_MS = 60 * 1000;
-const AFTER_CLOSE_READY_MINUTES = 15 * 60 + 5;
+const AFTER_CLOSE_READY_MINUTES = 15 * 60;
 const TOP_HOT_THEME_COUNT = 5;
 const MAX_THEME_CANDIDATES = 60;
 const MAX_TOTAL_CANDIDATES = 220;
@@ -202,14 +202,35 @@ function buildSummaryFromState() {
 
 function normalizeReadyState(referenceDate = new Date()) {
   const lastSuccessDay = state.lastSuccessAt ? formatTradingDay(new Date(state.lastSuccessAt)) : null;
-  if (!isAfterCloseReady(referenceDate) || lastSuccessDay !== state.day || state.picks.length === 0) {
+  const currentDay = formatTradingDay(referenceDate);
+  const sameDayReady = isAfterCloseReady(referenceDate) && lastSuccessDay === currentDay;
+  const carryForwardReady = lastSuccessDay === state.day && lastSuccessDay !== currentDay;
+
+  if ((!sameDayReady && !carryForwardReady) || state.picks.length === 0) {
     return false;
   }
 
-  state.status = 'ready';
+  state.status = sameDayReady ? 'ready' : 'stale';
   state.error = null;
   state.summary = buildSummaryFromState();
+  if (carryForwardReady) {
+    state.summary.unshift(`当前展示的是 ${state.day} 收盘后的最新复盘结果，新的复盘会在下一个交易日收盘后覆盖。`);
+  }
   return true;
+}
+
+function shouldCarryForwardLatestSnapshot(referenceDate = new Date()) {
+  const currentDay = formatTradingDay(referenceDate);
+  const lastSuccessDay = state.lastSuccessAt ? formatTradingDay(new Date(state.lastSuccessAt)) : null;
+
+  return Boolean(
+    state.day
+    && lastSuccessDay
+    && state.day === lastSuccessDay
+    && state.day !== currentDay
+    && state.picks.length > 0
+    && !isAfterCloseReady(referenceDate),
+  );
 }
 
 function resetDailyState(dayKey) {
@@ -232,6 +253,10 @@ function ensureTradingDayState(referenceDate = new Date()) {
   const dayKey = formatTradingDay(referenceDate);
 
   if (state.day !== dayKey) {
+    if (shouldCarryForwardLatestSnapshot(referenceDate)) {
+      return;
+    }
+
     resetDailyState(dayKey);
   }
 }
@@ -1543,7 +1568,7 @@ function buildBacktestSnapshot(candidateRecords, options = {}) {
 function buildWaitingSummary(referenceDate = new Date()) {
   const closeTime = createDateAtMinutes(referenceDate, AFTER_CLOSE_READY_MINUTES);
   return [
-    `收盘复盘会在交易日 ${pad2(closeTime.getHours())}:${pad2(closeTime.getMinutes())} 后生成。`,
+    `收盘复盘会在交易日 ${pad2(closeTime.getHours())}:${pad2(closeTime.getMinutes())} 后自动生成，生成后会持续展示直到下一次收盘结果覆盖。`,
     '筛选范围只保留 00 / 60 开头股票，并且要求属于同花顺当日前五大热门主题。',
     '模式条件为：近 6 日量能相对近 10 日明显抬升、沿 MA5 稳定推进、允许少量震荡换手，但最近没有连续两天跌破 MA5，且收盘不要离 5 日线太远。',
   ];
@@ -1611,6 +1636,10 @@ async function refreshPatternPicks(options = {}) {
   syncSchedule(now);
 
   if (!force && !isAfterCloseReady(now)) {
+    if (normalizeReadyState(now)) {
+      return cloneState();
+    }
+
     state.error = null;
     state.status = 'idle';
     state.summary = buildWaitingSummary(now);
@@ -1728,6 +1757,10 @@ async function getPatternPicksSnapshot(options = {}) {
   syncSchedule(now);
 
   if (!isAfterCloseReady(now)) {
+    if (normalizeReadyState(now)) {
+      return cloneState();
+    }
+
     state.error = null;
     state.status = 'idle';
     state.summary = buildWaitingSummary(now);

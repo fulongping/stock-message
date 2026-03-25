@@ -376,10 +376,28 @@ function resetDailyMarketState(dayKey) {
   internalState.slotSnapshots = [];
 }
 
+function shouldCarryForwardRotationReports(referenceDate = new Date()) {
+  const currentDay = formatTradingDay(referenceDate);
+  const lastSuccessDay = state.lastSuccessAt ? formatTradingDay(new Date(state.lastSuccessAt)) : null;
+
+  return Boolean(
+    state.historyDay
+    && lastSuccessDay
+    && state.historyDay === lastSuccessDay
+    && state.historyDay !== currentDay
+    && state.rotationReports.length > 0
+    && !isTradingSessionOpen(referenceDate),
+  );
+}
+
 function ensureTradingDayState(referenceDate = new Date()) {
   const dayKey = formatTradingDay(referenceDate);
 
   if (state.historyDay !== dayKey || internalState.historyDay !== dayKey) {
+    if (shouldCarryForwardRotationReports(referenceDate)) {
+      return;
+    }
+
     resetDailyMarketState(dayKey);
   }
 }
