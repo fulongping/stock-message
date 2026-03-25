@@ -444,6 +444,25 @@ body::before {
   line-height: 1;
 }
 
+.trade-chip {
+  font-weight: 700;
+}
+
+.trade-chip.up {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.trade-chip.down {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.trade-chip.flat {
+  background: rgba(110, 97, 87, 0.12);
+  color: var(--muted);
+}
+
 .market-stocks-panel {
   margin-top: 18px;
 }

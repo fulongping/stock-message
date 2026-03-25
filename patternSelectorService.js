@@ -12,6 +12,7 @@ const TOP_HOT_THEME_COUNT = 5;
 const MAX_THEME_CANDIDATES = 60;
 const MAX_TOTAL_CANDIDATES = 220;
 const TOP_PICK_COUNT = 5;
+const BACKTEST_SIGNAL_DAY_COUNT = 10;
 const MIN_BAR_COUNT = 25;
 const KLINE_CONCURRENCY = 8;
 const CONCEPT_INDEX_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -53,6 +54,20 @@ function createEmptyMarketOverview() {
   };
 }
 
+function createEmptyBacktest() {
+  return {
+    averageReturnPercent: null,
+    available: false,
+    basis: '按当前筛选池回放，不追溯历史热门主题；信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出。',
+    cumulativeReturnPercent: null,
+    dayWinRatePercent: null,
+    days: [],
+    signalDayCount: BACKTEST_SIGNAL_DAY_COUNT,
+    totalTrades: 0,
+    tradeWinRatePercent: null,
+  };
+}
+
 const state = {
   day: null,
   error: null,
@@ -60,6 +75,7 @@ const state = {
   intervalMs: POLL_INTERVAL_MS,
   lastAttemptAt: null,
   lastSuccessAt: null,
+  backtest: createEmptyBacktest(),
   marketOverview: createEmptyMarketOverview(),
   nextRefreshAt: null,
   picks: [],
@@ -151,6 +167,7 @@ function resetDailyState(dayKey) {
   state.filterCounts = createEmptyFilterCounts();
   state.lastAttemptAt = null;
   state.lastSuccessAt = null;
+  state.backtest = createEmptyBacktest();
   state.marketOverview = createEmptyMarketOverview();
   state.picks = [];
   state.status = 'idle';
@@ -364,6 +381,7 @@ async function loadCache() {
     state.intervalMs = cached.intervalMs || POLL_INTERVAL_MS;
     state.lastAttemptAt = cached.lastAttemptAt || null;
     state.lastSuccessAt = cached.lastSuccessAt || null;
+    state.backtest = cached.backtest || createEmptyBacktest();
     state.marketOverview = cached.marketOverview || createEmptyMarketOverview();
     state.nextRefreshAt = cached.nextRefreshAt || null;
     state.picks = Array.isArray(cached.picks) ? cached.picks : [];
@@ -1017,6 +1035,228 @@ async function getMarketOverview() {
   }
 }
 
+function sortStrictMatches(left, right) {
+  if ((right.themeRankScore || 0) !== (left.themeRankScore || 0)) {
+    return (right.themeRankScore || 0) - (left.themeRankScore || 0);
+  }
+
+  if ((right.runDays || 0) !== (left.runDays || 0)) {
+    return (right.runDays || 0) - (left.runDays || 0);
+  }
+
+  if ((right.runReturnPercent || 0) !== (left.runReturnPercent || 0)) {
+    return (right.runReturnPercent || 0) - (left.runReturnPercent || 0);
+  }
+
+  return (right.score || 0) - (left.score || 0);
+}
+
+function sortFallbackMatches(left, right) {
+  if ((right.themeRankScore || 0) !== (left.themeRankScore || 0)) {
+    return (right.themeRankScore || 0) - (left.themeRankScore || 0);
+  }
+
+  if ((right.recentAboveCount || 0) !== (left.recentAboveCount || 0)) {
+    return (right.recentAboveCount || 0) - (left.recentAboveCount || 0);
+  }
+
+  return (right.score || 0) - (left.score || 0);
+}
+
+function sortReserveMatches(left, right) {
+  if ((right.themeRankScore || 0) !== (left.themeRankScore || 0)) {
+    return (right.themeRankScore || 0) - (left.themeRankScore || 0);
+  }
+
+  const leftDeviation = Math.abs((left.aboveMa5Percent ?? 99) - 5);
+  const rightDeviation = Math.abs((right.aboveMa5Percent ?? 99) - 5);
+  if (leftDeviation !== rightDeviation) {
+    return leftDeviation - rightDeviation;
+  }
+
+  return (right.score || 0) - (left.score || 0);
+}
+
+function selectPicksFromEvaluations(evaluationResults, options = {}) {
+  const { unresolvedThemes = [] } = options;
+  const strictMatches = evaluationResults
+    .filter((item) => item && item.passed)
+    .sort(sortStrictMatches);
+  const strictPicks = strictMatches
+    .slice(0, TOP_PICK_COUNT)
+    .map((item) => ({
+      ...item,
+      selectionMode: 'strict',
+    }));
+  const selectedCodes = new Set(strictPicks.map((item) => item.code));
+  const fallbackMatches = evaluationResults
+    .filter((item) => item
+      && !item.error
+      && !selectedCodes.has(item.code)
+      && item.nearTrendCandidate)
+    .sort(sortFallbackMatches);
+  const fallbackPicks = fallbackMatches
+    .slice(0, Math.max(0, TOP_PICK_COUNT - strictPicks.length))
+    .map((item) => ({
+      ...item,
+      reasons: ['严格候选不足，当前按热门主题内最接近模式的趋势推进形态补位。', ...(item.reasons || [])],
+      selectionMode: 'fallback',
+    }));
+  const fallbackCodes = new Set([...selectedCodes, ...fallbackPicks.map((item) => item.code)]);
+  const reserveMatches = evaluationResults
+    .filter((item) => item
+      && !item.error
+      && !fallbackCodes.has(item.code)
+      && item.maxBelowMa5Streak < 2
+      && item.recentAboveCount >= Math.max(item.recentWindowLength - 4, 4)
+      && (item.maSlopePercent || 0) > 0)
+    .sort(sortReserveMatches);
+  const reservePicks = reserveMatches
+    .slice(0, Math.max(0, TOP_PICK_COUNT - strictPicks.length - fallbackPicks.length))
+    .map((item) => ({
+      ...item,
+      reasons: ['趋势推进候选仍不足，当前按同主题里 MA5 最顺的备选形态补位。', ...(item.reasons || [])],
+      selectionMode: 'reserve',
+    }));
+  const picks = [...strictPicks, ...fallbackPicks, ...reservePicks]
+    .slice(0, TOP_PICK_COUNT)
+    .map((item, index) => ({
+      ...item,
+      rank: index + 1,
+    }));
+  const failedKlineCount = evaluationResults.filter((item) => item && item.error).length;
+  const warnings = [];
+
+  if (unresolvedThemes.length > 0) {
+    warnings.push(`这些首页热门主题未能在概念题材库里精确匹配：${unresolvedThemes.join('、')}。`);
+  }
+
+  if (failedKlineCount > 0) {
+    warnings.push(`有 ${failedKlineCount} 只候选股票的日线数据抓取失败，已自动跳过。`);
+  }
+
+  if (strictMatches.length < TOP_PICK_COUNT && fallbackPicks.length > 0) {
+    warnings.push(`严格满足当前规则的股票只有 ${strictMatches.length} 只，剩余 ${fallbackPicks.length} 只按最接近的趋势推进形态补位。`);
+  }
+
+  if (reservePicks.length > 0) {
+    warnings.push(`趋势推进候选仍不足，另补了 ${reservePicks.length} 只 MA5 更顺的备选形态。`);
+  } else if (picks.length < TOP_PICK_COUNT) {
+    warnings.push(`严格满足当前规则的股票只有 ${picks.length} 只。`);
+  }
+
+  return {
+    failedKlineCount,
+    picks,
+    reservePicks,
+    strictMatches,
+    warnings,
+  };
+}
+
+function buildBacktestSnapshot(candidateRecords) {
+  const usableRecords = candidateRecords.filter((item) => item && !item.error && Array.isArray(item.bars) && item.bars.length >= MIN_BAR_COUNT + 2);
+  if (usableRecords.length === 0) {
+    return createEmptyBacktest();
+  }
+
+  const referenceBars = usableRecords
+    .map((item) => item.bars)
+    .sort((left, right) => right.length - left.length)[0];
+  const signalBars = referenceBars.slice(-(BACKTEST_SIGNAL_DAY_COUNT + 2), -2);
+
+  if (signalBars.length === 0) {
+    return createEmptyBacktest();
+  }
+
+  const days = signalBars.map((signalBar) => {
+    const signalDate = signalBar.date;
+    const historicalResults = usableRecords.map((record) => {
+      const signalIndex = record.bars.findIndex((bar) => bar.date === signalDate);
+
+      if (signalIndex === -1 || signalIndex + 2 >= record.bars.length) {
+        return {
+          code: record.candidate.code,
+          error: 'trade_window_unavailable',
+          name: record.candidate.name,
+          passed: false,
+        };
+      }
+
+      const historicalBars = record.bars.slice(0, signalIndex + 1);
+      return evaluatePatternCandidate({
+        ...record.candidate,
+        dailyChangePercent: null,
+        turnoverRate: null,
+        bars: historicalBars,
+      });
+    });
+    const selection = selectPicksFromEvaluations(historicalResults);
+    const trades = selection.picks
+      .map((pick) => {
+        const record = usableRecords.find((item) => item.candidate.code === pick.code);
+        if (!record) {
+          return null;
+        }
+
+        const signalIndex = record.bars.findIndex((bar) => bar.date === signalDate);
+        const entryBar = record.bars[signalIndex + 1];
+        const exitBar = record.bars[signalIndex + 2];
+        if (!entryBar || !exitBar || !Number.isFinite(entryBar.open) || !Number.isFinite(exitBar.close) || entryBar.open <= 0) {
+          return null;
+        }
+
+        return {
+          code: pick.code,
+          entryDate: entryBar.date,
+          entryOpen: roundNumber(entryBar.open, 3),
+          exitClose: roundNumber(exitBar.close, 3),
+          exitDate: exitBar.date,
+          name: pick.name,
+          rank: pick.rank,
+          returnPercent: roundNumber(((exitBar.close - entryBar.open) / entryBar.open) * 100, 2),
+          selectionMode: pick.selectionMode,
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => (left.rank || 99) - (right.rank || 99));
+    const portfolioReturnPercent = average(trades.map((item) => item.returnPercent));
+
+    return {
+      entryDate: trades[0]?.entryDate || null,
+      exitDate: trades[0]?.exitDate || null,
+      pickCount: selection.picks.length,
+      picks: trades,
+      portfolioReturnPercent: roundNumber(portfolioReturnPercent, 2),
+      signalDate,
+      strictCount: selection.picks.filter((item) => item.selectionMode === 'strict').length,
+      tradeCount: trades.length,
+    };
+  });
+  const settledDays = days.filter((item) => Number.isFinite(item.portfolioReturnPercent));
+  const averageReturnPercent = average(settledDays.map((item) => item.portfolioReturnPercent));
+  const cumulativeReturnPercent = settledDays.reduce((accumulator, item) => accumulator * (1 + (item.portfolioReturnPercent / 100)), 1);
+  const positiveDays = settledDays.filter((item) => item.portfolioReturnPercent > 0).length;
+  const totalTrades = days.reduce((sum, item) => sum + item.tradeCount, 0);
+  const winningTrades = days.reduce((sum, item) => sum + item.picks.filter((trade) => trade.returnPercent > 0).length, 0);
+
+  return {
+    averageReturnPercent: roundNumber(averageReturnPercent, 2),
+    available: settledDays.length > 0,
+    basis: '按当前筛选池回放，不追溯历史热门主题；信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出。',
+    cumulativeReturnPercent: roundNumber((cumulativeReturnPercent - 1) * 100, 2),
+    dayWinRatePercent: settledDays.length > 0
+      ? roundNumber((positiveDays / settledDays.length) * 100, 2)
+      : null,
+    days,
+    signalDayCount: days.length,
+    totalTrades,
+    tradeWinRatePercent: totalTrades > 0
+      ? roundNumber((winningTrades / totalTrades) * 100, 2)
+      : null,
+  };
+}
+
 function buildWaitingSummary(referenceDate = new Date()) {
   const closeTime = createDateAtMinutes(referenceDate, AFTER_CLOSE_READY_MINUTES);
   return [
@@ -1053,6 +1293,10 @@ function buildSummary(context) {
     lines.push(`盘中 5 分钟历史已保存 ${context.marketOverview.savedIntervals} 个区间，收盘前最近一次主榜靠前的是：${names}。`);
   } else {
     lines.push('盘中 5 分钟历史不可用，本次复盘主要依据同花顺热门主题、成分股与日线形态。');
+  }
+
+  if (context.backtest?.available) {
+    lines.push(`按当前筛选池回放最近 ${context.backtest.signalDayCount} 个信号日，T+1 开盘买、T+2 收盘卖，日均收益 ${roundNumber(context.backtest.averageReturnPercent, 2)}%，累计收益 ${roundNumber(context.backtest.cumulativeReturnPercent, 2)}%。`);
   }
 
   return lines;
@@ -1097,147 +1341,61 @@ async function refreshPatternPicks(options = {}) {
         getMarketOverview(),
       ]);
       const candidateContext = await buildCandidatePool(topThemes, marketSnapshot);
-      const evaluationResults = await mapWithConcurrency(candidateContext.candidates, KLINE_CONCURRENCY, async (candidate) => {
+      const candidateRecords = await mapWithConcurrency(candidateContext.candidates, KLINE_CONCURRENCY, async (candidate) => {
         try {
           const bars = await fetchDailyBars(candidate.code, state.day);
-          return evaluatePatternCandidate({
-            ...candidate,
+          return {
             bars,
-          });
+            candidate,
+            evaluation: evaluatePatternCandidate({
+              ...candidate,
+              bars,
+            }),
+          };
         } catch (error) {
           return {
-            code: candidate.code,
+            ...candidate,
+            bars: [],
             error: error.message,
-            name: candidate.name,
-            passed: false,
+            evaluation: {
+              code: candidate.code,
+              error: error.message,
+              name: candidate.name,
+              passed: false,
+            },
           };
         }
       });
-
-      const strictMatches = evaluationResults
-        .filter((item) => item && item.passed)
-        .sort((left, right) => {
-          if ((right.themeRankScore || 0) !== (left.themeRankScore || 0)) {
-            return (right.themeRankScore || 0) - (left.themeRankScore || 0);
-          }
-
-          if ((right.runDays || 0) !== (left.runDays || 0)) {
-            return (right.runDays || 0) - (left.runDays || 0);
-          }
-
-          if ((right.runReturnPercent || 0) !== (left.runReturnPercent || 0)) {
-            return (right.runReturnPercent || 0) - (left.runReturnPercent || 0);
-          }
-
-          return (right.score || 0) - (left.score || 0);
-        });
-      const strictPicks = strictMatches
-        .slice(0, TOP_PICK_COUNT)
-        .map((item) => ({
-          ...item,
-          selectionMode: 'strict',
-        }));
-      const selectedCodes = new Set(strictPicks.map((item) => item.code));
-      const fallbackMatches = evaluationResults
-        .filter((item) => item
-          && !item.error
-          && !selectedCodes.has(item.code)
-          && item.nearTrendCandidate)
-        .sort((left, right) => {
-          if ((right.themeRankScore || 0) !== (left.themeRankScore || 0)) {
-            return (right.themeRankScore || 0) - (left.themeRankScore || 0);
-          }
-
-          if ((right.recentAboveCount || 0) !== (left.recentAboveCount || 0)) {
-            return (right.recentAboveCount || 0) - (left.recentAboveCount || 0);
-          }
-
-          return (right.score || 0) - (left.score || 0);
-        });
-      const fallbackPicks = fallbackMatches
-        .slice(0, Math.max(0, TOP_PICK_COUNT - strictPicks.length))
-        .map((item) => ({
-          ...item,
-          reasons: ['严格候选不足，当前按热门主题内最接近模式的趋势推进形态补位。', ...(item.reasons || [])],
-          selectionMode: 'fallback',
-        }));
-      const fallbackCodes = new Set([...selectedCodes, ...fallbackPicks.map((item) => item.code)]);
-      const reserveMatches = evaluationResults
-        .filter((item) => item
-          && !item.error
-          && !fallbackCodes.has(item.code)
-          && item.maxBelowMa5Streak < 2
-          && item.recentAboveCount >= Math.max(item.recentWindowLength - 4, 4)
-          && (item.maSlopePercent || 0) > 0)
-        .sort((left, right) => {
-          if ((right.themeRankScore || 0) !== (left.themeRankScore || 0)) {
-            return (right.themeRankScore || 0) - (left.themeRankScore || 0);
-          }
-
-          const leftDeviation = Math.abs((left.aboveMa5Percent ?? 99) - 5);
-          const rightDeviation = Math.abs((right.aboveMa5Percent ?? 99) - 5);
-          if (leftDeviation !== rightDeviation) {
-            return leftDeviation - rightDeviation;
-          }
-
-          return (right.score || 0) - (left.score || 0);
-        });
-      const reservePicks = reserveMatches
-        .slice(0, Math.max(0, TOP_PICK_COUNT - strictPicks.length - fallbackPicks.length))
-        .map((item) => ({
-          ...item,
-          reasons: ['趋势推进候选仍不足，当前按同主题里 MA5 最顺的备选形态补位。', ...(item.reasons || [])],
-          selectionMode: 'reserve',
-        }));
-      const picks = [...strictPicks, ...fallbackPicks, ...reservePicks]
-        .slice(0, TOP_PICK_COUNT)
-        .map((item, index) => ({
-          ...item,
-          rank: index + 1,
-        }));
-      const failedKlineCount = evaluationResults.filter((item) => item && item.error).length;
-      const warnings = [];
-
-      if (candidateContext.unresolvedThemes.length > 0) {
-        warnings.push(`这些首页热门主题未能在概念题材库里精确匹配：${candidateContext.unresolvedThemes.join('、')}。`);
-      }
-
-      if (failedKlineCount > 0) {
-        warnings.push(`有 ${failedKlineCount} 只候选股票的日线数据抓取失败，已自动跳过。`);
-      }
-
-      if (strictMatches.length < TOP_PICK_COUNT && fallbackPicks.length > 0) {
-        warnings.push(`严格满足当前规则的股票只有 ${strictMatches.length} 只，剩余 ${fallbackPicks.length} 只按最接近的趋势推进形态补位。`);
-      }
-
-      if (reservePicks.length > 0) {
-        warnings.push(`趋势推进候选仍不足，另补了 ${reservePicks.length} 只 MA5 更顺的备选形态。`);
-      } else if (picks.length < TOP_PICK_COUNT) {
-        warnings.push(`严格满足当前规则的股票只有 ${picks.length} 只。`);
-      }
+      const evaluationResults = candidateRecords.map((item) => item.evaluation);
+      const selection = selectPicksFromEvaluations(evaluationResults, {
+        unresolvedThemes: candidateContext.unresolvedThemes,
+      });
+      const backtest = buildBacktestSnapshot(candidateRecords);
 
       state.error = null;
       state.filterCounts = {
         candidateCount: candidateContext.candidateCount,
         evaluatedCount: evaluationResults.length,
-        finalPickCount: picks.length,
-        strictMatchCount: strictMatches.length,
+        finalPickCount: selection.picks.length,
+        strictMatchCount: selection.strictMatches.length,
         themeMemberCount: candidateContext.themeMemberCount,
       };
       state.lastSuccessAt = new Date().toISOString();
+      state.backtest = backtest;
       state.marketOverview = marketOverview;
-      state.picks = picks;
+      state.picks = selection.picks;
       state.status = 'ready';
       state.summary = buildSummary({
+        backtest,
         candidateCount: candidateContext.candidateCount,
-        finalPickCount: picks.length,
+        finalPickCount: selection.picks.length,
         marketOverview,
-        strictMatchCount: strictMatches.length,
+        strictMatchCount: selection.strictMatches.length,
         themeMemberCount: candidateContext.themeMemberCount,
         topThemes: candidateContext.topThemes,
       });
       state.topThemes = candidateContext.topThemes;
-      state.warnings = warnings;
+      state.warnings = selection.warnings;
       syncSchedule(new Date());
 
       await saveCache();

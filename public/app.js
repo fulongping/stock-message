@@ -26,6 +26,13 @@ const marketElements = {
 };
 
 const patternElements = {
+  backtestAvgText: document.getElementById('patternBacktestAvgText'),
+  backtestBasisText: document.getElementById('patternBacktestBasisText'),
+  backtestCumText: document.getElementById('patternBacktestCumText'),
+  backtestDayCountText: document.getElementById('patternBacktestDayCountText'),
+  backtestGrid: document.getElementById('patternBacktestGrid'),
+  backtestTradeCountText: document.getElementById('patternBacktestTradeCountText'),
+  backtestWinRateText: document.getElementById('patternBacktestWinRateText'),
   countdownText: document.getElementById('patternCountdownText'),
   dayText: document.getElementById('patternDayText'),
   errorPanel: document.getElementById('patternErrorPanel'),
@@ -190,7 +197,7 @@ function createTag(text) {
 
 function createChangeBadge(value) {
   const badge = document.createElement('span');
-  const numeric = Number(value);
+  const numeric = value === null || value === undefined ? Number.NaN : Number(value);
   const tone = numeric > 0 ? 'up' : numeric < 0 ? 'down' : 'flat';
   badge.className = `change-badge ${tone}`;
   badge.textContent = formatPercent(numeric, 2);
@@ -611,6 +618,78 @@ function renderPatternError(snapshot) {
   patternElements.errorPanel.textContent = `最近一次收盘复盘失败：${snapshot.error}`;
 }
 
+function renderPatternBacktest(snapshot) {
+  const backtest = snapshot.backtest || {};
+  patternElements.backtestDayCountText.textContent = String(backtest.signalDayCount || 0);
+  patternElements.backtestTradeCountText.textContent = String(backtest.totalTrades || 0);
+  patternElements.backtestAvgText.textContent = formatPercent(backtest.averageReturnPercent, 2);
+  patternElements.backtestCumText.textContent = formatPercent(backtest.cumulativeReturnPercent, 2);
+  patternElements.backtestWinRateText.textContent = formatPercent(backtest.dayWinRatePercent, 2);
+
+  let basisText = backtest.basis || '按当前筛选池回放：信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出';
+  if (backtest.available) {
+    basisText = `${basisText} 日胜率 ${formatPercent(backtest.dayWinRatePercent, 2)}，单笔胜率 ${formatPercent(backtest.tradeWinRatePercent, 2)}。`;
+  }
+  patternElements.backtestBasisText.textContent = basisText;
+
+  patternElements.backtestGrid.innerHTML = '';
+  if (!backtest.available || !backtest.days || backtest.days.length === 0) {
+    patternElements.backtestGrid.appendChild(createEmptyBlock('收盘复盘完成后，这里会展示最近 10 个信号日的 T+1 开盘买 / T+2 收盘卖回测。'));
+    return;
+  }
+
+  [...backtest.days].reverse().forEach((day) => {
+    const card = document.createElement('article');
+    card.className = 'stock-card backtest-card';
+
+    const top = document.createElement('div');
+    top.className = 'stock-top';
+
+    const heading = document.createElement('div');
+    heading.className = 'stock-heading';
+
+    const title = document.createElement('h4');
+    title.textContent = day.signalDate || '--';
+
+    const meta = document.createElement('p');
+    meta.className = 'stock-code';
+    meta.textContent = `${day.entryDate || '--'} 开盘买入 · ${day.exitDate || '--'} 收盘卖出`;
+
+    heading.append(title, meta);
+    top.append(heading, createChangeBadge(day.portfolioReturnPercent));
+
+    const metrics = document.createElement('div');
+    metrics.className = 'stock-metrics';
+    [
+      `组合收益 ${formatPercent(day.portfolioReturnPercent, 2)}`,
+      `入选股票 ${day.pickCount || 0} 只`,
+      `严格候选 ${day.strictCount || 0} 只`,
+      `可结算交易 ${day.tradeCount || 0} 笔`,
+    ].forEach((text) => {
+      const line = document.createElement('p');
+      line.className = 'metric-line';
+      line.textContent = text;
+      metrics.appendChild(line);
+    });
+
+    const picks = document.createElement('div');
+    picks.className = 'tag-list';
+    (day.picks || []).forEach((pick) => {
+      const chip = document.createElement('span');
+      chip.className = `tag-pill trade-chip ${pick.returnPercent > 0 ? 'up' : pick.returnPercent < 0 ? 'down' : 'flat'}`;
+      chip.textContent = `${String(pick.rank || '--').padStart(2, '0')} ${pick.name} ${formatPercent(pick.returnPercent, 2)}`;
+      picks.appendChild(chip);
+    });
+
+    if (!day.picks || day.picks.length === 0) {
+      picks.appendChild(createEmptyBlock('当天没有形成可结算的回测交易。'));
+    }
+
+    card.append(top, metrics, picks);
+    patternElements.backtestGrid.appendChild(card);
+  });
+}
+
 function renderPatternSnapshot(snapshot) {
   latestPatternSnapshot = snapshot;
   patternElements.statusBadge.textContent = getStatusText(snapshot.status);
@@ -623,6 +702,7 @@ function renderPatternSnapshot(snapshot) {
 
   renderPatternSummary(snapshot.summary);
   renderPatternThemes(snapshot);
+  renderPatternBacktest(snapshot);
   renderPatternPicks(snapshot);
   setPanelMessage(patternElements.warningPanel, snapshot.warnings, 'warning-line');
   renderPatternError(snapshot);

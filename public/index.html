@@ -181,6 +181,38 @@
 
         <section class="panel market-stocks-panel">
           <div class="subsection-head">
+            <div>
+              <h3>近 10 日回测</h3>
+              <p id="patternBacktestBasisText" class="panel-caption">按当前筛选池回放：信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出</p>
+            </div>
+          </div>
+          <div class="meta-grid">
+            <div class="meta-item">
+              <span class="panel-label">信号日数</span>
+              <strong id="patternBacktestDayCountText">0</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">总交易数</span>
+              <strong id="patternBacktestTradeCountText">0</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">日均收益</span>
+              <strong id="patternBacktestAvgText">--</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">累计收益</span>
+              <strong id="patternBacktestCumText">--</strong>
+            </div>
+            <div class="meta-item">
+              <span class="panel-label">日胜率</span>
+              <strong id="patternBacktestWinRateText">--</strong>
+            </div>
+          </div>
+          <div id="patternBacktestGrid" class="market-leaders-grid"></div>
+        </section>
+
+        <section class="panel market-stocks-panel">
+          <div class="subsection-head">
             <h3>模式内 5 只股票</h3>
           </div>
           <div id="patternPicksGrid" class="market-leaders-grid"></div>
