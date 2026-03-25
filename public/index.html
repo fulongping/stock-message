@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -135,7 +135,15 @@
             </div>
             <span id="marketHistoryCountText" class="muted">0 个区间</span>
           </div>
-          <div id="marketHistoryGrid" class="leader-groups-grid"></div>
+          
+        <section class="panel market-stocks-panel">
+          <div class="subsection-head">
+            <div>
+              <h3>午盘 / 收盘热点迁移图</h3>
+              <p class="panel-caption">11:30 生成上午报告，15:00 生成全天报告，图表与摘要会同步保存到 data/theme-rotation/。</p>
+            </div>
+          </div>
+          <div id="marketRotationReportsGrid" class="rotation-reports-grid"></div>
         </section>
 
         <section class="panel market-panel">
@@ -214,11 +222,19 @@
               <strong id="patternBacktestCumText">--</strong>
             </div>
             <div class="meta-item">
-              <span class="panel-label">日胜率</span>
+              <span class="panel-label">单笔胜率</span>
               <strong id="patternBacktestWinRateText">--</strong>
             </div>
           </div>
-          <div id="patternBacktestGrid" class="market-leaders-grid"></div>
+          
+        <section class="panel market-stocks-panel">
+          <div class="subsection-head">
+            <div>
+              <h3>Rank1 到 Rank5 串行回放</h3>
+              <p class="panel-caption">五个候选位分开统计，便于根据最近收益率微调排序，实盘优先参考 rank1。</p>
+            </div>
+          </div>
+          <div id="patternRankStatsGrid" class="market-leaders-grid"></div>
         </section>
 
         <section class="panel market-stocks-panel">

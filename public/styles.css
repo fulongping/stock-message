@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   --bg-top: #f5efdf;
   --bg-bottom: #ebe0cb;
   --card: rgba(255, 251, 244, 0.84);
@@ -629,6 +629,50 @@ body::before {
   display: none;
 }
 
+.rotation-reports-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 16px;
+}
+
+.rotation-report-card {
+  padding: 18px;
+}
+
+.rotation-report-meta,
+.rotation-artifact {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.rotation-chart-frame {
+  margin-top: 14px;
+  padding: 14px;
+  border-radius: 22px;
+  border: 1px solid rgba(82, 52, 32, 0.1);
+  background: rgba(255, 249, 242, 0.82);
+  overflow-x: auto;
+}
+
+.rotation-chart-frame svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.rotation-summary-list {
+  margin: 14px 0 0;
+  padding-left: 20px;
+  color: var(--text);
+  line-height: 1.7;
+}
+
+.rotation-summary-list li + li {
+  margin-top: 6px;
+}
 @media (max-width: 1080px) {
   .speaker-grid,
   .market-leaders-grid {
@@ -636,7 +680,8 @@ body::before {
   }
 
   .content-grid,
-  .leader-groups-grid {
+  .leader-groups-grid,
+  .rotation-reports-grid {
     grid-template-columns: 1fr;
   }
 }

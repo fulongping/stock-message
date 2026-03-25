@@ -25,6 +25,21 @@ const MORNING_SESSION_END_MINUTES = 11 * 60 + 30;
 const AFTERNOON_SESSION_START_MINUTES = 13 * 60;
 const AFTERNOON_SESSION_END_MINUTES = 15 * 60;
 const CACHE_FILE = path.join(__dirname, 'data', 'market-leaders-cache.json');
+const ROTATION_REPORT_DIR = path.join(__dirname, 'data', 'theme-rotation');
+const ROTATION_CATEGORY_LIMIT = 6;
+const ROTATION_MIN_INTERVALS = 4;
+const ROTATION_REPORT_DEFINITIONS = [
+  {
+    cutoffMinutes: MORNING_SESSION_END_MINUTES,
+    key: 'midday',
+    label: '午盘热点迁移',
+  },
+  {
+    cutoffMinutes: AFTERNOON_SESSION_END_MINUTES,
+    key: 'close',
+    label: '收盘热点迁移',
+  },
+];
 const SUPPORTED_CODE_PATTERN = /^(60|00)/;
 const ST_NAME_PATTERN = /(?:^|\b)\*?ST/i;
 const SESSION_START_MINUTES = new Set([
@@ -59,6 +74,8 @@ const state = {
   lastSuccessAt: null,
   leaders: [],
   nextRefreshAt: null,
+  rotationInsights: [],
+  rotationReports: [],
   sourceUrl: SOURCE_URL,
   status: 'idle',
   summary: [],
@@ -95,9 +112,33 @@ function cloneHistoryEntry(entry) {
   return {
     comparisonEndedAt: entry.comparisonEndedAt,
     comparisonStartedAt: entry.comparisonStartedAt,
+    fallers: (entry.fallers || []).map((leader) => ({ ...leader })),
     leaders: (entry.leaders || []).map((leader) => ({ ...leader })),
+    themeScores: (entry.themeScores || []).map((score) => ({ ...score })),
+    topFaller: entry.topFaller ? { ...entry.topFaller } : null,
     topLeader: entry.topLeader ? { ...entry.topLeader } : null,
     windowMinutes: entry.windowMinutes,
+  };
+}
+
+function cloneRotationReport(report) {
+  return {
+    artifacts: report.artifacts ? { ...report.artifacts } : null,
+    categories: (report.categories || []).map((category) => ({ ...category })),
+    dominantTheme: report.dominantTheme,
+    generatedAt: report.generatedAt,
+    headline: report.headline,
+    intervalCount: report.intervalCount,
+    label: report.label,
+    series: (report.series || []).map((item) => ({
+      ...item,
+      categoryScores: (item.categoryScores || []).map((score) => ({ ...score })),
+    })),
+    sessionKey: report.sessionKey,
+    summaryLines: [...(report.summaryLines || [])],
+    svgMarkup: report.svgMarkup || '',
+    windowEndedAt: report.windowEndedAt,
+    windowStartedAt: report.windowStartedAt,
   };
 }
 
@@ -128,6 +169,8 @@ function cloneState() {
       concepts: Array.isArray(leader.concepts) ? [...leader.concepts] : [],
     })),
     nextRefreshAt: state.nextRefreshAt,
+    rotationInsights: [...state.rotationInsights],
+    rotationReports: state.rotationReports.map(cloneRotationReport),
     sourceUrl: state.sourceUrl,
     status: state.status,
     summary: [...state.summary],
@@ -275,6 +318,15 @@ function roundNumber(value, digits = 3) {
   return Math.round(value * factor) / factor;
 }
 
+function averageNumbers(values) {
+  const usable = values.filter((value) => Number.isFinite(value));
+  if (usable.length === 0) {
+    return null;
+  }
+
+  return usable.reduce((sum, value) => sum + value, 0) / usable.length;
+}
+
 function parseNumber(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
@@ -317,6 +369,8 @@ function resetDailyMarketState(dayKey) {
   state.historyDay = dayKey;
   state.lastAttemptAt = null;
   state.lastSuccessAt = null;
+  state.rotationInsights = [];
+  state.rotationReports = [];
   state.status = 'idle';
   internalState.historyDay = dayKey;
   internalState.slotSnapshots = [];
@@ -699,6 +753,74 @@ function buildIntervalDetails(currentSnapshot, lookbackMinutes) {
   };
 }
 
+function getLeaderThemeLabel(leader) {
+  if (leader?.primaryCategory) {
+    return leader.primaryCategory;
+  }
+
+  if (Array.isArray(leader?.concepts) && leader.concepts.length > 0) {
+    return leader.concepts[0];
+  }
+
+  return leader?.board || '其他';
+}
+
+function buildIntervalThemeScores(leaders = [], fallers = []) {
+  const categoryMap = new Map();
+
+  const ensureCategory = (label) => {
+    if (!categoryMap.has(label)) {
+      categoryMap.set(label, {
+        fallerCount: 0,
+        fallerPressure: 0,
+        label,
+        leaderCount: 0,
+        leaderStrength: 0,
+        momentumScore: 0,
+        netScore: 0,
+      });
+    }
+
+    return categoryMap.get(label);
+  };
+
+  leaders.forEach((leader, index) => {
+    const label = getLeaderThemeLabel(leader);
+    const item = ensureCategory(label);
+    const strength = Math.max(Number(leader.windowChangePercent) || 0, 0);
+    const rankBonus = Math.max(TOP_STOCK_COUNT - index, 1) * 0.08;
+    item.leaderCount += 1;
+    item.leaderStrength += strength;
+    item.momentumScore += strength + rankBonus;
+  });
+
+  fallers.forEach((leader, index) => {
+    const label = getLeaderThemeLabel(leader);
+    const item = ensureCategory(label);
+    const pressure = Math.abs(Math.min(Number(leader.windowChangePercent) || 0, 0));
+    const rankBonus = Math.max(5 - index, 1) * 0.06;
+    item.fallerCount += 1;
+    item.fallerPressure += pressure;
+    item.momentumScore -= pressure + rankBonus;
+  });
+
+  return [...categoryMap.values()]
+    .map((item) => ({
+      ...item,
+      fallerPressure: roundNumber(item.fallerPressure, 3),
+      leaderStrength: roundNumber(item.leaderStrength, 3),
+      momentumScore: roundNumber(item.momentumScore, 3),
+      netScore: roundNumber(item.leaderStrength - item.fallerPressure, 3),
+    }))
+    .sort((left, right) => {
+      if ((right.momentumScore || 0) !== (left.momentumScore || 0)) {
+        return (right.momentumScore || 0) - (left.momentumScore || 0);
+      }
+
+      return (right.netScore || 0) - (left.netScore || 0);
+    });
+}
+
 function mapLeaderForState(leader, index) {
   return {
     board: leader.board,
@@ -721,6 +843,7 @@ function mapHistoryLeader(leader, index) {
   return {
     board: leader.board,
     code: leader.code,
+    concepts: Array.isArray(leader.concepts) ? leader.concepts.slice(0, 3) : [],
     name: leader.name,
     primaryCategory: leader.primaryCategory,
     rank: index + 1,
@@ -728,11 +851,14 @@ function mapHistoryLeader(leader, index) {
   };
 }
 
-function buildHistoryEntry(details, leaders) {
+function buildHistoryEntry(details, leaders, fallers) {
   return {
     comparisonEndedAt: details.comparisonEndedAt,
     comparisonStartedAt: details.comparisonStartedAt,
+    fallers: fallers.map(mapHistoryLeader),
     leaders: leaders.map(mapHistoryLeader),
+    themeScores: buildIntervalThemeScores(leaders, fallers),
+    topFaller: fallers.length > 0 ? mapHistoryLeader(fallers[0], 0) : null,
     topLeader: leaders.length > 0 ? mapHistoryLeader(leaders[0], 0) : null,
     windowMinutes: details.windowMinutes,
   };
@@ -770,17 +896,77 @@ function sanitizeGroupEntries(groups) {
     .filter((group) => group.stocks.length > 0);
 }
 
+function sanitizeThemeScores(scores) {
+  return (Array.isArray(scores) ? scores : [])
+    .filter((score) => score && score.label)
+    .map((score) => ({
+      fallerCount: Number(score.fallerCount) || 0,
+      fallerPressure: roundNumber(Number(score.fallerPressure) || 0, 3),
+      label: String(score.label),
+      leaderCount: Number(score.leaderCount) || 0,
+      leaderStrength: roundNumber(Number(score.leaderStrength) || 0, 3),
+      momentumScore: roundNumber(Number(score.momentumScore) || 0, 3),
+      netScore: roundNumber(Number(score.netScore) || 0, 3),
+    }));
+}
+
 function sanitizeHistoryEntries(entries) {
   return (Array.isArray(entries) ? entries : [])
     .map((entry) => {
       const leaders = sanitizeRankedStocks(entry.leaders);
+      const fallers = sanitizeRankedStocks(entry.fallers);
       return {
         ...entry,
+        fallers,
         leaders,
+        themeScores: sanitizeThemeScores(entry.themeScores).length > 0
+          ? sanitizeThemeScores(entry.themeScores)
+          : buildIntervalThemeScores(leaders, fallers),
+        topFaller: fallers.length > 0 ? { ...fallers[0] } : null,
         topLeader: leaders.length > 0 ? { ...leaders[0] } : null,
       };
     })
     .filter((entry) => entry.leaders.length > 0);
+}
+
+function sanitizeRotationReports(reports) {
+  return (Array.isArray(reports) ? reports : [])
+    .filter((report) => report && report.sessionKey && report.label)
+    .map((report) => ({
+      artifacts: report.artifacts ? { ...report.artifacts } : null,
+      categories: (Array.isArray(report.categories) ? report.categories : [])
+        .filter((category) => category && category.label)
+        .map((category) => ({
+          activityScore: roundNumber(Number(category.activityScore) || 0, 3),
+          averageNetScore: roundNumber(Number(category.averageNetScore) || 0, 3),
+          label: String(category.label),
+          totalFallerPressure: roundNumber(Number(category.totalFallerPressure) || 0, 3),
+          totalLeaderStrength: roundNumber(Number(category.totalLeaderStrength) || 0, 3),
+          totalNetScore: roundNumber(Number(category.totalNetScore) || 0, 3),
+        })),
+      dominantTheme: report.dominantTheme || null,
+      generatedAt: report.generatedAt || null,
+      headline: report.headline || '',
+      intervalCount: Number(report.intervalCount) || 0,
+      label: String(report.label),
+      series: (Array.isArray(report.series) ? report.series : []).map((item) => ({
+        categoryScores: (Array.isArray(item.categoryScores) ? item.categoryScores : [])
+          .filter((score) => score && score.label)
+          .map((score) => ({
+            label: String(score.label),
+            netScore: roundNumber(Number(score.netScore) || 0, 3),
+          })),
+        comparisonEndedAt: item.comparisonEndedAt || null,
+        comparisonStartedAt: item.comparisonStartedAt || null,
+        dominantCategory: item.dominantCategory || null,
+        dominantScore: roundNumber(Number(item.dominantScore) || 0, 3),
+      })),
+      sessionKey: String(report.sessionKey),
+      summaryLines: (Array.isArray(report.summaryLines) ? report.summaryLines : []).map((line) => String(line)),
+      svgMarkup: report.svgMarkup || '',
+      windowEndedAt: report.windowEndedAt || null,
+      windowStartedAt: report.windowStartedAt || null,
+    }));
 }
 
 function sanitizeLoadedState() {
@@ -791,6 +977,8 @@ function sanitizeLoadedState() {
     ? internalState.slotSnapshots.filter((item) => item && item.slotEndedAt && item.universeSnapshot)
     : [];
   state.leaders = sanitizeRankedStocks(state.leaders);
+  state.rotationReports = sanitizeRotationReports(state.rotationReports);
+  state.rotationInsights = (Array.isArray(state.rotationInsights) ? state.rotationInsights : []).map((line) => String(line));
 
   if (containsUnsupportedLeaderCodes(state.leaders)
     || containsUnsupportedLeaderCodes(state.fallers)
@@ -865,6 +1053,348 @@ function buildSummary(details, groups, historyCount, fiveMinuteFallers = []) {
   return lines;
 }
 
+function appendRotationInsightSummary(lines, rotationInsights = []) {
+  const nextLines = Array.isArray(lines) ? [...lines] : [];
+  if (!Array.isArray(rotationInsights) || rotationInsights.length === 0) {
+    return nextLines;
+  }
+
+  if (nextLines.some((line) => String(line).startsWith('热点迁移报告：'))) {
+    return nextLines;
+  }
+
+  nextLines.push(`热点迁移报告：${rotationInsights.join('；')}`);
+  return nextLines;
+}
+
+function getEntryThemeScores(entry) {
+  if (Array.isArray(entry.themeScores) && entry.themeScores.length > 0) {
+    return entry.themeScores;
+  }
+
+  return buildIntervalThemeScores(entry.leaders || [], entry.fallers || []);
+}
+
+function escapeSvgText(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function truncateLabel(value, maxLength = 8) {
+  const text = String(value || '');
+  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+}
+
+function blendColor(start, end, ratio) {
+  const clampRatio = Math.max(0, Math.min(1, ratio));
+  const channels = start.map((channel, index) => Math.round(channel + ((end[index] - channel) * clampRatio)));
+  return `rgb(${channels.join(',')})`;
+}
+
+function getRotationHeatColor(score, maxAbsScore) {
+  if (!Number.isFinite(score) || maxAbsScore <= 0) {
+    return 'rgba(255, 245, 239, 0.9)';
+  }
+
+  const intensity = Math.min(Math.abs(score) / maxAbsScore, 1);
+  if (score >= 0) {
+    return blendColor([252, 236, 230], [181, 58, 36], intensity);
+  }
+
+  return blendColor([232, 244, 236], [39, 126, 76], intensity);
+}
+
+function buildRotationSvg(report) {
+  const categories = report.categories || [];
+  const series = report.series || [];
+  if (categories.length === 0 || series.length === 0) {
+    return '';
+  }
+
+  const cellWidth = 58;
+  const cellHeight = 34;
+  const leftMargin = 138;
+  const topMargin = 72;
+  const footerHeight = 54;
+  const width = leftMargin + (series.length * cellWidth) + 28;
+  const height = topMargin + (categories.length * cellHeight) + footerHeight;
+  const maxAbsScore = Math.max(
+    ...series.flatMap((item) => (item.categoryScores || []).map((score) => Math.abs(score.netScore || 0))),
+    0.5,
+  );
+
+  const cells = [];
+  const xLabels = [];
+  const yLabels = [];
+
+  categories.forEach((category, rowIndex) => {
+    const y = topMargin + (rowIndex * cellHeight);
+    yLabels.push(`
+      <text x="${leftMargin - 12}" y="${y + 21}" font-size="13" text-anchor="end" fill="#6e6157">${escapeSvgText(truncateLabel(category.label, 10))}</text>
+    `);
+
+    series.forEach((item, columnIndex) => {
+      const x = leftMargin + (columnIndex * cellWidth);
+      const score = (item.categoryScores || []).find((entry) => entry.label === category.label)?.netScore || 0;
+      cells.push(`
+        <rect x="${x}" y="${y}" width="${cellWidth - 8}" height="${cellHeight - 6}" rx="9" fill="${getRotationHeatColor(score, maxAbsScore)}" opacity="0.94" />
+      `);
+
+      if (rowIndex === 0) {
+        xLabels.push(`
+          <text x="${x + ((cellWidth - 8) / 2)}" y="${topMargin - 12}" font-size="11" text-anchor="middle" fill="#6e6157">${escapeSvgText(new Date(item.comparisonEndedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }))}</text>
+        `);
+      }
+    });
+  });
+
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeSvgText(report.label)}">`,
+    '<defs>',
+    '  <linearGradient id="rotationBg" x1="0%" x2="100%" y1="0%" y2="100%">',
+    '    <stop offset="0%" stop-color="#fff8f2" />',
+    '    <stop offset="100%" stop-color="#f3e7d8" />',
+    '  </linearGradient>',
+    '</defs>',
+    `<rect x="0" y="0" width="${width}" height="${height}" rx="26" fill="url(#rotationBg)" stroke="rgba(82, 52, 32, 0.12)" />`,
+    `<text x="${leftMargin}" y="30" font-size="22" font-family="'Source Han Serif SC','Songti SC',serif" fill="#22160f">${escapeSvgText(report.label)}</text>`,
+    `<text x="${leftMargin}" y="52" font-size="12" fill="#6e6157">${escapeSvgText(report.windowStartedAt)} - ${escapeSvgText(report.windowEndedAt)} · ${report.intervalCount} 个 5 分钟区间</text>`,
+    cells.join(''),
+    xLabels.join(''),
+    yLabels.join(''),
+    `<text x="${leftMargin}" y="${height - 18}" font-size="12" fill="#b33a24">红色=升温，绿色=退潮，颜色越深代表净强度越大</text>`,
+    '</svg>',
+  ].join('');
+}
+
+function buildRotationReportHeadline(label, dominantTheme, transition, streak) {
+  if (dominantTheme && transition) {
+    return `${label}以 ${dominantTheme} 为核心，主切换在 ${transition.from} -> ${transition.to}。`;
+  }
+
+  if (dominantTheme && streak) {
+    return `${label}最强主线是 ${dominantTheme}，并且持续性最好。`;
+  }
+
+  return `${label}已生成。`;
+}
+
+function buildRotationReport(entries, definition, historyDay) {
+  const eligibleEntries = [...entries]
+    .filter((entry) => {
+      const endedAt = new Date(entry.comparisonEndedAt);
+      const totalMinutes = (endedAt.getHours() * 60) + endedAt.getMinutes();
+      return (entry.windowMinutes || 5) === 5 && totalMinutes <= definition.cutoffMinutes;
+    })
+    .sort((left, right) => Date.parse(left.comparisonEndedAt) - Date.parse(right.comparisonEndedAt));
+
+  if (eligibleEntries.length < ROTATION_MIN_INTERVALS) {
+    return null;
+  }
+
+  const categoryAggregate = new Map();
+  const series = eligibleEntries.map((entry) => {
+    const scoreMap = new Map(getEntryThemeScores(entry).map((score) => [score.label, score]));
+    scoreMap.forEach((score, label) => {
+      if (!categoryAggregate.has(label)) {
+        categoryAggregate.set(label, {
+          activityScore: 0,
+          label,
+          totalFallerPressure: 0,
+          totalLeaderStrength: 0,
+          totalNetScore: 0,
+        });
+      }
+
+      const aggregate = categoryAggregate.get(label);
+      aggregate.activityScore += (score.leaderStrength || 0) + (score.fallerPressure || 0);
+      aggregate.totalFallerPressure += score.fallerPressure || 0;
+      aggregate.totalLeaderStrength += score.leaderStrength || 0;
+      aggregate.totalNetScore += score.netScore || 0;
+    });
+
+    const dominantScore = [...scoreMap.values()]
+      .sort((left, right) => {
+        if ((right.momentumScore || 0) !== (left.momentumScore || 0)) {
+          return (right.momentumScore || 0) - (left.momentumScore || 0);
+        }
+
+        return (right.netScore || 0) - (left.netScore || 0);
+      })[0] || null;
+
+    return {
+      comparisonEndedAt: entry.comparisonEndedAt,
+      comparisonStartedAt: entry.comparisonStartedAt,
+      dominantCategory: dominantScore?.label || null,
+      dominantScore: roundNumber(dominantScore?.momentumScore || dominantScore?.netScore || 0, 3),
+      scoreMap,
+    };
+  });
+
+  const categories = [...categoryAggregate.values()]
+    .map((item) => ({
+      activityScore: roundNumber(item.activityScore, 3),
+      averageNetScore: roundNumber(item.totalNetScore / eligibleEntries.length, 3),
+      label: item.label,
+      totalFallerPressure: roundNumber(item.totalFallerPressure, 3),
+      totalLeaderStrength: roundNumber(item.totalLeaderStrength, 3),
+      totalNetScore: roundNumber(item.totalNetScore, 3),
+    }))
+    .sort((left, right) => {
+      if ((right.activityScore || 0) !== (left.activityScore || 0)) {
+        return (right.activityScore || 0) - (left.activityScore || 0);
+      }
+
+      return (right.totalNetScore || 0) - (left.totalNetScore || 0);
+    })
+    .slice(0, ROTATION_CATEGORY_LIMIT);
+
+  const topCategoryLabels = new Set(categories.map((item) => item.label));
+  const normalizedSeries = series.map((item) => ({
+    categoryScores: categories.map((category) => ({
+      label: category.label,
+      netScore: roundNumber(item.scoreMap.get(category.label)?.netScore || 0, 3),
+    })),
+    comparisonEndedAt: item.comparisonEndedAt,
+    comparisonStartedAt: item.comparisonStartedAt,
+    dominantCategory: topCategoryLabels.has(item.dominantCategory) ? item.dominantCategory : (item.dominantCategory || null),
+    dominantScore: item.dominantScore,
+  }));
+
+  const dominantThemes = categories.slice(0, 3);
+  let longestStreak = null;
+  let currentStreak = null;
+  const transitions = [];
+
+  normalizedSeries.forEach((item, index) => {
+    if (item.dominantCategory) {
+      if (currentStreak && currentStreak.label === item.dominantCategory) {
+        currentStreak.length += 1;
+        currentStreak.endedAt = item.comparisonEndedAt;
+      } else {
+        currentStreak = {
+          endedAt: item.comparisonEndedAt,
+          label: item.dominantCategory,
+          length: 1,
+          startedAt: item.comparisonStartedAt,
+        };
+      }
+
+      if (!longestStreak || currentStreak.length > longestStreak.length) {
+        longestStreak = { ...currentStreak };
+      }
+    }
+
+    if (index > 0) {
+      const previous = normalizedSeries[index - 1];
+      if (previous.dominantCategory && item.dominantCategory && previous.dominantCategory !== item.dominantCategory) {
+        transitions.push({
+          at: item.comparisonEndedAt,
+          from: previous.dominantCategory,
+          strength: roundNumber((previous.dominantScore || 0) + (item.dominantScore || 0), 3),
+          to: item.dominantCategory,
+        });
+      }
+    }
+  });
+
+  const strongestTransition = transitions
+    .sort((left, right) => (right.strength || 0) - (left.strength || 0))[0] || null;
+
+  const splitIndex = Math.max(1, Math.floor(normalizedSeries.length / 2));
+  const firstHalf = normalizedSeries.slice(0, splitIndex);
+  const secondHalf = normalizedSeries.slice(splitIndex);
+  let risingTheme = null;
+  let fadingTheme = null;
+
+  categories.forEach((category) => {
+    const firstAverage = averageNumbers(firstHalf.map((item) => item.categoryScores.find((score) => score.label === category.label)?.netScore || 0)) || 0;
+    const secondAverage = averageNumbers(secondHalf.map((item) => item.categoryScores.find((score) => score.label === category.label)?.netScore || 0)) || 0;
+    const delta = roundNumber(secondAverage - firstAverage, 3);
+    const payload = {
+      delta,
+      label: category.label,
+    };
+
+    if (!risingTheme || delta > risingTheme.delta) {
+      risingTheme = payload;
+    }
+
+    if (!fadingTheme || delta < fadingTheme.delta) {
+      fadingTheme = payload;
+    }
+  });
+
+  const summaryLines = [];
+  if (dominantThemes.length > 0) {
+    summaryLines.push(`${definition.label}最强的三条主线分别是：${dominantThemes.map((item) => `${item.label}(${item.averageNetScore})`).join('、')}。`);
+  }
+  if (longestStreak) {
+    summaryLines.push(`持续性最强的是 ${longestStreak.label}，连续主导 ${longestStreak.length} 个区间，时间覆盖 ${longestStreak.startedAt} 到 ${longestStreak.endedAt}。`);
+  }
+  if (strongestTransition) {
+    summaryLines.push(`最明显的热点切换发生在 ${strongestTransition.at} 前后：${strongestTransition.from} 切向 ${strongestTransition.to}。`);
+  }
+  if (risingTheme && risingTheme.delta > 0) {
+    summaryLines.push(`后半段升温最快的是 ${risingTheme.label}，相对前半段净强度提升 ${risingTheme.delta}。`);
+  }
+  if (fadingTheme && fadingTheme.delta < 0) {
+    summaryLines.push(`后半段退潮最快的是 ${fadingTheme.label}，相对前半段净强度回落 ${Math.abs(fadingTheme.delta)}。`);
+  }
+
+  const report = {
+    artifacts: {
+      jsonPath: path.join(ROTATION_REPORT_DIR, `${historyDay}-${definition.key}.json`),
+      svgPath: path.join(ROTATION_REPORT_DIR, `${historyDay}-${definition.key}.svg`),
+    },
+    categories,
+    dominantTheme: dominantThemes[0]?.label || null,
+    generatedAt: new Date().toISOString(),
+    headline: buildRotationReportHeadline(definition.label, dominantThemes[0]?.label || null, strongestTransition, longestStreak),
+    intervalCount: normalizedSeries.length,
+    label: definition.label,
+    series: normalizedSeries,
+    sessionKey: definition.key,
+    summaryLines,
+    windowEndedAt: eligibleEntries[eligibleEntries.length - 1].comparisonEndedAt,
+    windowStartedAt: eligibleEntries[0].comparisonStartedAt,
+  };
+
+  report.svgMarkup = buildRotationSvg(report);
+  return report;
+}
+
+function buildRotationReports(historyEntries, historyDay) {
+  return ROTATION_REPORT_DEFINITIONS
+    .map((definition) => buildRotationReport(historyEntries, definition, historyDay))
+    .filter(Boolean);
+}
+
+function buildRotationInsights(reports) {
+  return reports.map((report) => report.headline).filter(Boolean);
+}
+
+async function persistRotationReports(reports) {
+  if (!Array.isArray(reports) || reports.length === 0) {
+    return;
+  }
+
+  await fs.mkdir(ROTATION_REPORT_DIR, { recursive: true });
+
+  await Promise.all(reports.map(async (report) => {
+    const jsonPayload = {
+      ...report,
+      svgMarkup: undefined,
+    };
+
+    await fs.writeFile(report.artifacts.jsonPath, JSON.stringify(jsonPayload, null, 2), 'utf8');
+    await fs.writeFile(report.artifacts.svgPath, report.svgMarkup || '', 'utf8');
+  }));
+}
+
 async function loadCache() {
   try {
     const rawCache = await fs.readFile(CACHE_FILE, 'utf8');
@@ -889,6 +1419,8 @@ async function loadCache() {
     state.lastSuccessAt = cached.lastSuccessAt || null;
     state.leaders = Array.isArray(cached.leaders) ? cached.leaders : [];
     state.nextRefreshAt = cached.nextRefreshAt || null;
+    state.rotationInsights = Array.isArray(cached.rotationInsights) ? cached.rotationInsights : [];
+    state.rotationReports = Array.isArray(cached.rotationReports) ? cached.rotationReports : [];
     state.status = cached.status || 'idle';
     state.summary = Array.isArray(cached.summary) ? cached.summary : [];
     state.windowMinutes = cached.windowMinutes ?? null;
@@ -899,6 +1431,16 @@ async function loadCache() {
 
     sanitizeLoadedState();
     pruneConceptCache();
+
+    if (state.history.length > 0 && state.rotationReports.length === 0) {
+      state.rotationReports = buildRotationReports(state.history, state.historyDay);
+      state.rotationInsights = buildRotationInsights(state.rotationReports);
+    }
+
+    if (state.rotationReports.length > 0) {
+      state.summary = appendRotationInsightSummary(state.summary, state.rotationInsights);
+      await persistRotationReports(state.rotationReports);
+    }
   } catch (error) {
     if (error.code !== 'ENOENT') {
       console.warn('Failed to load market leaders cache:', error.message);
@@ -997,7 +1539,7 @@ async function refreshMarketLeaders(options = {}) {
         : [];
 
       if (persistHistory && fiveMinuteDetails.comparisonReady) {
-        upsertHistoryEntry(buildHistoryEntry(fiveMinuteDetails, fiveMinuteLeaders));
+        upsertHistoryEntry(buildHistoryEntry(fiveMinuteDetails, fiveMinuteLeaders, fiveMinuteFallers));
       }
 
       const displayLookbackMinutes = shouldDisplayFifteenMinuteLeaders(slotEndedAtDate) ? 15 : 5;
@@ -1020,14 +1562,20 @@ async function refreshMarketLeaders(options = {}) {
       state.historyDay = formatTradingDay(slotEndedAtDate);
       state.lastSuccessAt = currentSnapshot.capturedAt;
       state.leaders = displayLeaders.map(mapLeaderForState);
+      state.rotationReports = buildRotationReports(state.history, state.historyDay);
+      state.rotationInsights = buildRotationInsights(state.rotationReports);
       state.status = 'ready';
-      state.summary = buildSummary(displayDetails, groups, state.history.length, fiveMinuteFallers);
+      state.summary = appendRotationInsightSummary(
+        buildSummary(displayDetails, groups, state.history.length, fiveMinuteFallers),
+        state.rotationInsights,
+      );
       state.windowMinutes = displayDetails.windowMinutes;
 
       internalState.historyDay = state.historyDay;
       upsertSlotSnapshot(currentSnapshot);
       syncSchedule(new Date(currentSnapshot.capturedAt));
 
+      await persistRotationReports(state.rotationReports);
       await saveCache();
       return cloneState();
     } catch (error) {
@@ -1079,6 +1627,8 @@ async function getMarketLeadersSnapshot(options = {}) {
     state.status = 'idle';
     state.summary = buildInSessionWaitingSummary(state.history.length);
   }
+
+  state.summary = appendRotationInsightSummary(state.summary, state.rotationInsights);
 
   return cloneState();
 }

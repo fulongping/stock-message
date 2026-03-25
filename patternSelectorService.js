@@ -71,10 +71,14 @@ function createEmptyBacktest() {
   return {
     averageReturnPercent: null,
     available: false,
-    basis: '按当前筛选池回放，不追溯历史热门主题；信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出，并剔除次日一字涨停无法买入的股票。',
+    basis: '按当前筛选池回放，不追溯历史热门主题；当前实盘口径按小资金串行模式处理，只做 rank1，信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出，卖出后的下一交易日才能再次开仓，并剔除次日一字涨停无法买入的股票。',
     cumulativeReturnPercent: null,
     dayWinRatePercent: null,
     days: [],
+    preferredRank: 1,
+    rankStats: [],
+    reviewedSignalCount: 0,
+    skippedCapitalLockSignals: 0,
     signalDayCount: BACKTEST_SIGNAL_DAY_COUNT,
     totalSkippedLockedLimitUps: 0,
     totalTrades: 0,
@@ -1095,20 +1099,55 @@ async function getMarketOverview() {
   }
 }
 
-function sortStrictMatches(left, right) {
+function getRankingPreferences(rankingFeedback = null) {
+  return {
+    preferredAboveMa5Percent: Number.isFinite(rankingFeedback?.preferredAboveMa5Percent)
+      ? rankingFeedback.preferredAboveMa5Percent
+      : PREFERRED_ABOVE_MA5_PERCENT,
+    preferredRunDays: Number.isFinite(rankingFeedback?.preferredRunDays)
+      ? rankingFeedback.preferredRunDays
+      : PREFERRED_RUN_DAYS,
+    preferredRunReturnPercent: Number.isFinite(rankingFeedback?.preferredRunReturnPercent)
+      ? rankingFeedback.preferredRunReturnPercent
+      : PREFERRED_RUN_RETURN_PERCENT,
+    preferredShortVolumeLiftPercent: Number.isFinite(rankingFeedback?.preferredShortVolumeLiftPercent)
+      ? rankingFeedback.preferredShortVolumeLiftPercent
+      : 8,
+    preferredVolumeCenterLiftPercent: Number.isFinite(rankingFeedback?.preferredVolumeCenterLiftPercent)
+      ? rankingFeedback.preferredVolumeCenterLiftPercent
+      : 16,
+  };
+}
+
+function buildFreshnessPenalty(item, rankingPreferences) {
+  return Math.abs((item.runDays || 0) - rankingPreferences.preferredRunDays)
+    + (Math.abs((item.runReturnPercent || 0) - rankingPreferences.preferredRunReturnPercent) / 6)
+    + (Math.abs((item.aboveMa5Percent || 0) - rankingPreferences.preferredAboveMa5Percent) / 2);
+}
+
+function buildFeedbackBonus(item, rankingPreferences) {
+  const volumeGap = Math.abs((item.volumeCenterLiftPercent || 0) - rankingPreferences.preferredVolumeCenterLiftPercent);
+  const shortLiftGap = Math.abs((item.shortVolumeLiftPercent || 0) - rankingPreferences.preferredShortVolumeLiftPercent);
+  return 24 - (volumeGap / 3) - (shortLiftGap / 4);
+}
+
+function sortStrictMatches(left, right, rankingFeedback = null) {
+  const rankingPreferences = getRankingPreferences(rankingFeedback);
   if ((right.themeRankScore || 0) !== (left.themeRankScore || 0)) {
     return (right.themeRankScore || 0) - (left.themeRankScore || 0);
   }
 
-  const leftFreshnessPenalty = Math.abs((left.runDays || 0) - PREFERRED_RUN_DAYS)
-    + (Math.abs((left.runReturnPercent || 0) - PREFERRED_RUN_RETURN_PERCENT) / 6)
-    + (Math.abs((left.aboveMa5Percent || 0) - PREFERRED_ABOVE_MA5_PERCENT) / 2);
-  const rightFreshnessPenalty = Math.abs((right.runDays || 0) - PREFERRED_RUN_DAYS)
-    + (Math.abs((right.runReturnPercent || 0) - PREFERRED_RUN_RETURN_PERCENT) / 6)
-    + (Math.abs((right.aboveMa5Percent || 0) - PREFERRED_ABOVE_MA5_PERCENT) / 2);
+  const leftFreshnessPenalty = buildFreshnessPenalty(left, rankingPreferences);
+  const rightFreshnessPenalty = buildFreshnessPenalty(right, rankingPreferences);
 
   if (leftFreshnessPenalty !== rightFreshnessPenalty) {
     return leftFreshnessPenalty - rightFreshnessPenalty;
+  }
+
+  const leftFeedbackBonus = buildFeedbackBonus(left, rankingPreferences);
+  const rightFeedbackBonus = buildFeedbackBonus(right, rankingPreferences);
+  if (rightFeedbackBonus !== leftFeedbackBonus) {
+    return rightFeedbackBonus - leftFeedbackBonus;
   }
 
   if ((right.volumeSupportDays || 0) !== (left.volumeSupportDays || 0)) {
@@ -1118,9 +1157,16 @@ function sortStrictMatches(left, right) {
   return (right.score || 0) - (left.score || 0);
 }
 
-function sortFallbackMatches(left, right) {
+function sortFallbackMatches(left, right, rankingFeedback = null) {
+  const rankingPreferences = getRankingPreferences(rankingFeedback);
   if ((right.themeRankScore || 0) !== (left.themeRankScore || 0)) {
     return (right.themeRankScore || 0) - (left.themeRankScore || 0);
+  }
+
+  const leftFeedbackBonus = buildFeedbackBonus(left, rankingPreferences);
+  const rightFeedbackBonus = buildFeedbackBonus(right, rankingPreferences);
+  if (rightFeedbackBonus !== leftFeedbackBonus) {
+    return rightFeedbackBonus - leftFeedbackBonus;
   }
 
   if ((right.recentAboveCount || 0) !== (left.recentAboveCount || 0)) {
@@ -1130,25 +1176,32 @@ function sortFallbackMatches(left, right) {
   return (right.score || 0) - (left.score || 0);
 }
 
-function sortReserveMatches(left, right) {
+function sortReserveMatches(left, right, rankingFeedback = null) {
+  const rankingPreferences = getRankingPreferences(rankingFeedback);
   if ((right.themeRankScore || 0) !== (left.themeRankScore || 0)) {
     return (right.themeRankScore || 0) - (left.themeRankScore || 0);
   }
 
-  const leftDeviation = Math.abs((left.aboveMa5Percent ?? 99) - PREFERRED_ABOVE_MA5_PERCENT);
-  const rightDeviation = Math.abs((right.aboveMa5Percent ?? 99) - PREFERRED_ABOVE_MA5_PERCENT);
+  const leftDeviation = Math.abs((left.aboveMa5Percent ?? 99) - rankingPreferences.preferredAboveMa5Percent);
+  const rightDeviation = Math.abs((right.aboveMa5Percent ?? 99) - rankingPreferences.preferredAboveMa5Percent);
   if (leftDeviation !== rightDeviation) {
     return leftDeviation - rightDeviation;
+  }
+
+  const leftFeedbackBonus = buildFeedbackBonus(left, rankingPreferences);
+  const rightFeedbackBonus = buildFeedbackBonus(right, rankingPreferences);
+  if (rightFeedbackBonus !== leftFeedbackBonus) {
+    return rightFeedbackBonus - leftFeedbackBonus;
   }
 
   return (right.score || 0) - (left.score || 0);
 }
 
 function selectPicksFromEvaluations(evaluationResults, options = {}) {
-  const { unresolvedThemes = [] } = options;
+  const { rankingFeedback = null, unresolvedThemes = [] } = options;
   const strictMatches = evaluationResults
     .filter((item) => item && item.passed)
-    .sort(sortStrictMatches);
+    .sort((left, right) => sortStrictMatches(left, right, rankingFeedback));
   const strictPicks = strictMatches
     .slice(0, TOP_PICK_COUNT)
     .map((item) => ({
@@ -1161,7 +1214,7 @@ function selectPicksFromEvaluations(evaluationResults, options = {}) {
       && !item.error
       && !selectedCodes.has(item.code)
       && item.nearTrendCandidate)
-    .sort(sortFallbackMatches);
+    .sort((left, right) => sortFallbackMatches(left, right, rankingFeedback));
   const fallbackPicks = fallbackMatches
     .slice(0, Math.max(0, TOP_PICK_COUNT - strictPicks.length))
     .map((item) => ({
@@ -1177,7 +1230,7 @@ function selectPicksFromEvaluations(evaluationResults, options = {}) {
       && item.maxBelowMa5Streak < 2
       && item.recentAboveCount >= Math.max(item.recentWindowLength - 4, 4)
       && (item.maSlopePercent || 0) > 0)
-    .sort(sortReserveMatches);
+    .sort((left, right) => sortReserveMatches(left, right, rankingFeedback));
   const reservePicks = reserveMatches
     .slice(0, Math.max(0, TOP_PICK_COUNT - strictPicks.length - fallbackPicks.length))
     .map((item) => ({
@@ -1221,22 +1274,68 @@ function selectPicksFromEvaluations(evaluationResults, options = {}) {
   };
 }
 
-function buildBacktestSnapshot(candidateRecords) {
-  const usableRecords = candidateRecords.filter((item) => item && !item.error && Array.isArray(item.bars) && item.bars.length >= MIN_BAR_COUNT + 2);
-  if (usableRecords.length === 0) {
-    return createEmptyBacktest();
+function buildBacktestTradeAttempt(record, signalDate, pick) {
+  if (!record) {
+    return null;
   }
 
+  const signalIndex = record.bars.findIndex((bar) => bar.date === signalDate);
+  const entryBar = record.bars[signalIndex + 1];
+  const exitBar = record.bars[signalIndex + 2];
+  const tradeBase = {
+    aboveMa5Percent: pick.aboveMa5Percent,
+    code: pick.code,
+    name: pick.name,
+    rank: pick.rank,
+    runDays: pick.runDays,
+    runReturnPercent: pick.runReturnPercent,
+    score: pick.score,
+    selectionMode: pick.selectionMode,
+    shortVolumeLiftPercent: pick.shortVolumeLiftPercent,
+    themeRankScore: pick.themeRankScore,
+    volumeCenterLiftPercent: pick.volumeCenterLiftPercent,
+  };
+
+  if (!entryBar || !exitBar || !Number.isFinite(entryBar.open) || !Number.isFinite(exitBar.close) || entryBar.open <= 0) {
+    return {
+      ...tradeBase,
+      skippedReason: 'invalid_trade_window',
+    };
+  }
+
+  if (isLockedLimitUpBar(entryBar)) {
+    return {
+      ...tradeBase,
+      entryDate: entryBar.date,
+      exitDate: exitBar.date,
+      skippedReason: 'locked_limit_up',
+    };
+  }
+
+  return {
+    ...tradeBase,
+    entryDate: entryBar.date,
+    entryOpen: roundNumber(entryBar.open, 3),
+    exitClose: roundNumber(exitBar.close, 3),
+    exitDate: exitBar.date,
+    returnPercent: roundNumber(((exitBar.close - entryBar.open) / entryBar.open) * 100, 2),
+    skippedReason: null,
+  };
+}
+
+function buildBacktestSignalReviews(candidateRecords, selectionOptions = {}) {
+  const usableRecords = candidateRecords.filter((item) => item && !item.error && Array.isArray(item.bars) && item.bars.length >= MIN_BAR_COUNT + 2);
+  if (usableRecords.length === 0) {
+    return [];
+  }
+
+  const recordByCode = new Map(usableRecords.map((item) => [item.candidate.code, item]));
   const referenceBars = usableRecords
     .map((item) => item.bars)
     .sort((left, right) => right.length - left.length)[0];
   const signalBars = referenceBars.slice(-(BACKTEST_SIGNAL_DAY_COUNT + 2), -2);
 
-  if (signalBars.length === 0) {
-    return createEmptyBacktest();
-  }
-
-  const days = signalBars.map((signalBar) => {
+  return signalBars.map((signalBar) => {
     const signalDate = signalBar.date;
     const historicalResults = usableRecords.map((record) => {
       const signalIndex = record.bars.findIndex((bar) => bar.date === signalDate);
@@ -1250,91 +1349,169 @@ function buildBacktestSnapshot(candidateRecords) {
         };
       }
 
-      const historicalBars = record.bars.slice(0, signalIndex + 1);
       return evaluatePatternCandidate({
         ...record.candidate,
         dailyChangePercent: null,
         turnoverRate: null,
-        bars: historicalBars,
+        bars: record.bars.slice(0, signalIndex + 1),
       });
     });
-    const selection = selectPicksFromEvaluations(historicalResults);
-    const tradeAttempts = selection.picks
-      .map((pick) => {
-        const record = usableRecords.find((item) => item.candidate.code === pick.code);
-        if (!record) {
-          return null;
-        }
-
-        const signalIndex = record.bars.findIndex((bar) => bar.date === signalDate);
-        const entryBar = record.bars[signalIndex + 1];
-        const exitBar = record.bars[signalIndex + 2];
-        if (!entryBar || !exitBar || !Number.isFinite(entryBar.open) || !Number.isFinite(exitBar.close) || entryBar.open <= 0) {
-          return {
-            skippedReason: 'invalid_trade_window',
-          };
-        }
-
-        if (isLockedLimitUpBar(entryBar)) {
-          return {
-            skippedReason: 'locked_limit_up',
-          };
-        }
-
-        return {
-          code: pick.code,
-          entryDate: entryBar.date,
-          entryOpen: roundNumber(entryBar.open, 3),
-          exitClose: roundNumber(exitBar.close, 3),
-          exitDate: exitBar.date,
-          name: pick.name,
-          rank: pick.rank,
-          returnPercent: roundNumber(((exitBar.close - entryBar.open) / entryBar.open) * 100, 2),
-          selectionMode: pick.selectionMode,
-        };
-      })
-      .filter(Boolean);
-    const skippedLockedLimitUps = tradeAttempts.filter((item) => item.skippedReason === 'locked_limit_up').length;
-    const trades = tradeAttempts
-      .filter((item) => !item.skippedReason)
+    const selection = selectPicksFromEvaluations(historicalResults, selectionOptions);
+    const picks = selection.picks
+      .map((pick) => buildBacktestTradeAttempt(recordByCode.get(pick.code), signalDate, pick))
+      .filter(Boolean)
       .sort((left, right) => (left.rank || 99) - (right.rank || 99));
-    const portfolioReturnPercent = average(trades.map((item) => item.returnPercent));
 
     return {
-      entryDate: trades[0]?.entryDate || null,
-      exitDate: trades[0]?.exitDate || null,
       pickCount: selection.picks.length,
-      picks: trades,
-      portfolioReturnPercent: roundNumber(portfolioReturnPercent, 2),
+      picks,
       signalDate,
-      skippedLockedLimitUps,
+      skippedLockedLimitUps: picks.filter((item) => item.skippedReason === 'locked_limit_up').length,
       strictCount: selection.picks.filter((item) => item.selectionMode === 'strict').length,
-      tradeCount: trades.length,
+      tradablePickCount: picks.filter((item) => !item.skippedReason && Number.isFinite(item.returnPercent)).length,
     };
   });
-  const settledDays = days.filter((item) => Number.isFinite(item.portfolioReturnPercent));
-  const averageReturnPercent = average(settledDays.map((item) => item.portfolioReturnPercent));
-  const cumulativeReturnPercent = settledDays.reduce((accumulator, item) => accumulator * (1 + (item.portfolioReturnPercent / 100)), 1);
-  const positiveDays = settledDays.filter((item) => item.portfolioReturnPercent > 0).length;
-  const totalTrades = days.reduce((sum, item) => sum + item.tradeCount, 0);
-  const totalSkippedLockedLimitUps = days.reduce((sum, item) => sum + (item.skippedLockedLimitUps || 0), 0);
-  const winningTrades = days.reduce((sum, item) => sum + item.picks.filter((trade) => trade.returnPercent > 0).length, 0);
+}
+
+function buildSerialTradePlan(signalReviews, preferredRank = 1) {
+  let nextEligibleSignalDate = null;
+  let skippedCapitalLockSignals = 0;
+  let skippedLockedLimitUps = 0;
+  const trades = [];
+
+  signalReviews.forEach((review) => {
+    const preferredPick = review.picks.find((item) => item.rank === preferredRank);
+    if (!preferredPick) {
+      return;
+    }
+
+    if (nextEligibleSignalDate && review.signalDate < nextEligibleSignalDate) {
+      skippedCapitalLockSignals += 1;
+      return;
+    }
+
+    if (preferredPick.skippedReason === 'locked_limit_up') {
+      skippedLockedLimitUps += 1;
+      return;
+    }
+
+    if (preferredPick.skippedReason || !Number.isFinite(preferredPick.returnPercent)) {
+      return;
+    }
+
+    trades.push({
+      ...preferredPick,
+      pickCount: review.pickCount,
+      signalDate: review.signalDate,
+      strictCount: review.strictCount,
+    });
+    nextEligibleSignalDate = preferredPick.exitDate || review.signalDate;
+  });
+
+  const averageReturnPercent = average(trades.map((item) => item.returnPercent));
+  const cumulativeReturnPercent = trades.reduce((accumulator, item) => accumulator * (1 + (item.returnPercent / 100)), 1);
+  const winningTrades = trades.filter((item) => item.returnPercent > 0).length;
 
   return {
     averageReturnPercent: roundNumber(averageReturnPercent, 2),
-    available: settledDays.length > 0,
-    basis: '按当前筛选池回放，不追溯历史热门主题；信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出，并剔除次日一字涨停无法买入的股票。',
     cumulativeReturnPercent: roundNumber((cumulativeReturnPercent - 1) * 100, 2),
-    dayWinRatePercent: settledDays.length > 0
-      ? roundNumber((positiveDays / settledDays.length) * 100, 2)
+    preferredRank,
+    skippedCapitalLockSignals,
+    skippedLockedLimitUps,
+    totalTrades: trades.length,
+    trades,
+    winRatePercent: trades.length > 0
+      ? roundNumber((winningTrades / trades.length) * 100, 2)
       : null,
-    days,
-    signalDayCount: days.length,
-    totalSkippedLockedLimitUps,
-    totalTrades,
-    tradeWinRatePercent: totalTrades > 0
-      ? roundNumber((winningTrades / totalTrades) * 100, 2)
-      : null,
+  };
+}
+
+function buildRankStats(signalReviews) {
+  return Array.from({ length: TOP_PICK_COUNT }, (_, index) => {
+    const rank = index + 1;
+    const rankPicks = signalReviews
+      .map((review) => review.picks.find((item) => item.rank === rank) || null)
+      .filter(Boolean);
+    const serialPlan = buildSerialTradePlan(signalReviews, rank);
+
+    return {
+      averageReturnPercent: serialPlan.averageReturnPercent,
+      cumulativeReturnPercent: serialPlan.cumulativeReturnPercent,
+      rank,
+      reviewedSignals: rankPicks.length,
+      skippedCapitalLockSignals: serialPlan.skippedCapitalLockSignals,
+      skippedLockedLimitUps: serialPlan.skippedLockedLimitUps,
+      totalTrades: serialPlan.totalTrades,
+      tradeWinRatePercent: serialPlan.winRatePercent,
+    };
+  });
+}
+
+function buildRankingFeedbackProfile(signalReviews) {
+  const winners = signalReviews
+    .flatMap((review) => review.picks)
+    .filter((item) => !item.skippedReason && Number.isFinite(item.returnPercent) && item.returnPercent > 0);
+
+  if (winners.length < 6) {
+    return null;
+  }
+
+  const weights = winners.map((item) => Math.max(item.returnPercent, 0.5));
+  const weightedAverage = (values) => {
+    if (!Array.isArray(values) || values.length === 0) {
+      return null;
+    }
+
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+    if (!Number.isFinite(totalWeight) || totalWeight <= 0) {
+      return null;
+    }
+
+    const total = values.reduce((sum, value, index) => sum + (value * weights[index]), 0);
+    return total / totalWeight;
+  };
+  const clamp = (value, min, max) => {
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+
+    return Math.min(max, Math.max(min, value));
+  };
+
+  return {
+    preferredAboveMa5Percent: clamp(weightedAverage(winners.map((item) => item.aboveMa5Percent || 0)), 0.5, 6.5),
+    preferredRunDays: clamp(weightedAverage(winners.map((item) => item.runDays || 0)), 4, 8),
+    preferredRunReturnPercent: clamp(weightedAverage(winners.map((item) => item.runReturnPercent || 0)), 6, 22),
+    preferredShortVolumeLiftPercent: clamp(weightedAverage(winners.map((item) => item.shortVolumeLiftPercent || 0)), 0, 25),
+    preferredVolumeCenterLiftPercent: clamp(weightedAverage(winners.map((item) => item.volumeCenterLiftPercent || 0)), 4, 30),
+  };
+}
+
+function buildBacktestSnapshot(candidateRecords, options = {}) {
+  const { preferredRank = 1, rankingFeedback = null } = options;
+  const signalReviews = buildBacktestSignalReviews(candidateRecords, { rankingFeedback });
+  if (signalReviews.length === 0) {
+    return createEmptyBacktest();
+  }
+
+  const serialPlan = buildSerialTradePlan(signalReviews, preferredRank);
+  const rankStats = buildRankStats(signalReviews);
+
+  return {
+    averageReturnPercent: serialPlan.averageReturnPercent,
+    available: true,
+    basis: `按当前筛选池回放，不追溯历史热门主题；当前实盘口径按小资金串行模式处理，只做 rank${preferredRank}，信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出，卖出后的下一交易日才能再次开仓，并剔除次日一字涨停无法买入的股票。`,
+    cumulativeReturnPercent: serialPlan.cumulativeReturnPercent,
+    dayWinRatePercent: serialPlan.winRatePercent,
+    days: serialPlan.trades,
+    preferredRank,
+    rankStats,
+    reviewedSignalCount: signalReviews.length,
+    signalDayCount: signalReviews.length,
+    skippedCapitalLockSignals: serialPlan.skippedCapitalLockSignals,
+    totalSkippedLockedLimitUps: serialPlan.skippedLockedLimitUps,
+    totalTrades: serialPlan.totalTrades,
+    tradeWinRatePercent: serialPlan.winRatePercent,
   };
 }
 
@@ -1377,7 +1554,18 @@ function buildSummary(context) {
   }
 
   if (context.backtest?.available) {
-    lines.push(`按当前筛选池回放最近 ${context.backtest.signalDayCount} 个信号日，T+1 开盘买、T+2 收盘卖，日均收益 ${roundNumber(context.backtest.averageReturnPercent, 2)}%，累计收益 ${roundNumber(context.backtest.cumulativeReturnPercent, 2)}%。`);
+    const bestRank = [...(context.backtest.rankStats || [])]
+      .sort((left, right) => {
+        if ((right.cumulativeReturnPercent || 0) !== (left.cumulativeReturnPercent || 0)) {
+          return (right.cumulativeReturnPercent || 0) - (left.cumulativeReturnPercent || 0);
+        }
+
+        return (right.averageReturnPercent || 0) - (left.averageReturnPercent || 0);
+      })[0];
+    lines.push(`最近 ${context.backtest.reviewedSignalCount || context.backtest.signalDayCount} 个信号日按小资金串行口径只回放 rank${context.backtest.preferredRank}，单笔均值 ${roundNumber(context.backtest.averageReturnPercent, 2)}%，累计收益 ${roundNumber(context.backtest.cumulativeReturnPercent, 2)}%，期间因资金占用跳过 ${context.backtest.skippedCapitalLockSignals || 0} 个信号。`);
+    if (bestRank) {
+      lines.push(`五个候选位次分开统计后，近期最强的是 rank${bestRank.rank}，累计收益 ${roundNumber(bestRank.cumulativeReturnPercent, 2)}%，单笔胜率 ${roundNumber(bestRank.tradeWinRatePercent, 2)}%。当前排序会参考最近收益反馈，尽量把更适合实盘的图形往前推。`);
+    }
   }
 
   return lines;
@@ -1448,10 +1636,16 @@ async function refreshPatternPicks(options = {}) {
         }
       });
       const evaluationResults = candidateRecords.map((item) => item.evaluation);
+      const baseSignalReviews = buildBacktestSignalReviews(candidateRecords);
+      const rankingFeedback = buildRankingFeedbackProfile(baseSignalReviews);
       const selection = selectPicksFromEvaluations(evaluationResults, {
+        rankingFeedback,
         unresolvedThemes: candidateContext.unresolvedThemes,
       });
-      const backtest = buildBacktestSnapshot(candidateRecords);
+      const backtest = buildBacktestSnapshot(candidateRecords, {
+        preferredRank: 1,
+        rankingFeedback,
+      });
 
       state.error = null;
       state.filterCounts = {

@@ -18,6 +18,7 @@ const marketElements = {
   groupsGrid: document.getElementById('marketGroupsGrid'),
   historyCountText: document.getElementById('marketHistoryCountText'),
   historyGrid: document.getElementById('marketHistoryGrid'),
+  rotationReportsGrid: document.getElementById('marketRotationReportsGrid'),
   leadersGrid: document.getElementById('marketLeadersGrid'),
   modeText: document.getElementById('marketModeText'),
   startText: document.getElementById('marketStartText'),
@@ -40,6 +41,7 @@ const patternElements = {
   matchCountText: document.getElementById('patternMatchCountText'),
   lastSuccessText: document.getElementById('patternLastSuccessText'),
   picksGrid: document.getElementById('patternPicksGrid'),
+  rankStatsGrid: document.getElementById('patternRankStatsGrid'),
   statusBadge: document.getElementById('patternStatusBadge'),
   summaryList: document.getElementById('patternSummaryList'),
   themeCountText: document.getElementById('patternThemeCountText'),
@@ -341,7 +343,7 @@ function renderMarketLeaders(snapshot) {
   marketElements.leadersGrid.innerHTML = '';
 
   if (!snapshot.comparisonReady) {
-    marketElements.leadersGrid.appendChild(createEmptyBlock('已经拿到当前基准快照，下一轮 5 分钟整点后这里会显示 60 / 00 主板区间涨幅前十。'));
+    marketElements.leadersGrid.appendChild(createEmptyBlock('基准快照已建立，下一次有效 5 分钟节点后这里会显示主板区间涨幅前十。'));
     return;
   }
 
@@ -376,7 +378,6 @@ function renderMarketLeaders(snapshot) {
 
     const metrics = document.createElement('div');
     metrics.className = 'stock-metrics';
-
     [
       `区间涨幅 ${formatPercent(leader.windowChangePercent, 2)}`,
       `当前价格 ${leader.price ?? '--'}`,
@@ -392,13 +393,8 @@ function renderMarketLeaders(snapshot) {
 
     const tags = document.createElement('div');
     tags.className = 'tag-list';
-    const tagSource = leader.concepts && leader.concepts.length > 0
-      ? leader.concepts.slice(0, 4)
-      : [leader.board];
-
-    tagSource.forEach((tag) => {
-      tags.appendChild(createTag(tag));
-    });
+    const tagSource = leader.concepts && leader.concepts.length > 0 ? leader.concepts.slice(0, 4) : [leader.board];
+    tagSource.forEach((tag) => tags.appendChild(createTag(tag)));
 
     card.append(top, metrics, tags);
     marketElements.leadersGrid.appendChild(card);
@@ -444,7 +440,6 @@ function renderMarketFallers(snapshot) {
 
     const metrics = document.createElement('div');
     metrics.className = 'stock-metrics';
-
     [
       `5 分钟回落 ${formatPercent(leader.windowChangePercent, 2)}`,
       `当前价格 ${leader.price ?? '--'}`,
@@ -460,13 +455,8 @@ function renderMarketFallers(snapshot) {
 
     const tags = document.createElement('div');
     tags.className = 'tag-list';
-    const tagSource = leader.concepts && leader.concepts.length > 0
-      ? leader.concepts.slice(0, 4)
-      : [leader.board];
-
-    tagSource.forEach((tag) => {
-      tags.appendChild(createTag(tag));
-    });
+    const tagSource = leader.concepts && leader.concepts.length > 0 ? leader.concepts.slice(0, 4) : [leader.board];
+    tagSource.forEach((tag) => tags.appendChild(createTag(tag)));
 
     card.append(top, metrics, tags);
     marketElements.fallersGrid.appendChild(card);
@@ -518,6 +508,71 @@ function renderMarketHistory(snapshot) {
   });
 }
 
+function renderRotationReports(snapshot) {
+  marketElements.rotationReportsGrid.innerHTML = '';
+
+  if (!snapshot.rotationReports || snapshot.rotationReports.length === 0) {
+    marketElements.rotationReportsGrid.appendChild(createEmptyBlock('午盘和收盘后会在这里生成热点迁移图，并保存对应 SVG / JSON 报告。'));
+    return;
+  }
+
+  snapshot.rotationReports.forEach((report) => {
+    const card = document.createElement('article');
+    card.className = 'stock-card rotation-report-card';
+
+    const top = document.createElement('div');
+    top.className = 'stock-top';
+
+    const heading = document.createElement('div');
+    heading.className = 'stock-heading';
+
+    const title = document.createElement('h4');
+    title.textContent = report.label;
+
+    const meta = document.createElement('p');
+    meta.className = 'stock-code';
+    meta.textContent = `${formatClock(report.windowStartedAt)} - ${formatClock(report.windowEndedAt)} · ${report.intervalCount || 0} 个区间`;
+
+    heading.append(title, meta);
+    top.append(heading, createTag(report.dominantTheme || '待观察'));
+
+    const reportMeta = document.createElement('p');
+    reportMeta.className = 'rotation-report-meta';
+    reportMeta.textContent = report.headline || `生成时间：${formatDateTime(report.generatedAt)}`;
+
+    const chart = document.createElement('div');
+    chart.className = 'rotation-chart-frame';
+    if (report.svgMarkup) {
+      chart.innerHTML = report.svgMarkup;
+    } else {
+      chart.appendChild(createEmptyBlock('图表还未生成。'));
+    }
+
+    const summary = document.createElement('ul');
+    summary.className = 'rotation-summary-list';
+    if (report.summaryLines && report.summaryLines.length > 0) {
+      report.summaryLines.forEach((line) => {
+        const item = document.createElement('li');
+        item.textContent = line;
+        summary.appendChild(item);
+      });
+    } else {
+      const item = document.createElement('li');
+      item.textContent = '暂无可展示的迁移规律摘要。';
+      summary.appendChild(item);
+    }
+
+    const artifact = document.createElement('p');
+    artifact.className = 'rotation-artifact';
+    artifact.textContent = report.artifacts
+      ? `已保存：${report.artifacts.jsonPath} | ${report.artifacts.svgPath}`
+      : '报告文件尚未落盘';
+
+    card.append(top, reportMeta, chart, summary, artifact);
+    marketElements.rotationReportsGrid.appendChild(card);
+  });
+}
+
 function renderMarketError(snapshot) {
   if (!snapshot.error) {
     marketElements.errorPanel.classList.add('hidden');
@@ -526,7 +581,7 @@ function renderMarketError(snapshot) {
   }
 
   marketElements.errorPanel.classList.remove('hidden');
-  marketElements.errorPanel.textContent = `最近一次区间涨幅统计失败：${snapshot.error}`;
+  marketElements.errorPanel.textContent = `最近一次区间统计失败：${snapshot.error}`;
 }
 
 function renderMarketSnapshot(snapshot) {
@@ -548,6 +603,7 @@ function renderMarketSnapshot(snapshot) {
   renderMarketLeaders(snapshot);
   renderMarketFallers(snapshot);
   renderMarketHistory(snapshot);
+  renderRotationReports(snapshot);
   renderMarketError(snapshot);
 }
 
@@ -691,21 +747,21 @@ function renderPatternError(snapshot) {
 
 function renderPatternBacktest(snapshot) {
   const backtest = snapshot.backtest || {};
-  patternElements.backtestDayCountText.textContent = String(backtest.signalDayCount || 0);
+  patternElements.backtestDayCountText.textContent = String(backtest.reviewedSignalCount || backtest.signalDayCount || 0);
   patternElements.backtestTradeCountText.textContent = String(backtest.totalTrades || 0);
   patternElements.backtestAvgText.textContent = formatPercent(backtest.averageReturnPercent, 2);
   patternElements.backtestCumText.textContent = formatPercent(backtest.cumulativeReturnPercent, 2);
-  patternElements.backtestWinRateText.textContent = formatPercent(backtest.dayWinRatePercent, 2);
+  patternElements.backtestWinRateText.textContent = formatPercent(backtest.tradeWinRatePercent, 2);
 
-  let basisText = backtest.basis || '按当前筛选池回放：信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出';
+  let basisText = backtest.basis || '按小资金串行口径回放 rank1。';
   if (backtest.available) {
-    basisText = `${basisText} 日胜率 ${formatPercent(backtest.dayWinRatePercent, 2)}，单笔胜率 ${formatPercent(backtest.tradeWinRatePercent, 2)}。`;
+    basisText = `${basisText} 已回看 ${backtest.reviewedSignalCount || backtest.signalDayCount || 0} 个信号日，因资金占用跳过 ${backtest.skippedCapitalLockSignals || 0} 次，剔除次日一字板 ${backtest.totalSkippedLockedLimitUps || 0} 次。`;
   }
   patternElements.backtestBasisText.textContent = basisText;
 
   patternElements.backtestGrid.innerHTML = '';
-  if (!backtest.available || !backtest.days || backtest.days.length === 0) {
-    patternElements.backtestGrid.appendChild(createEmptyBlock('收盘复盘完成后，这里会展示最近 10 个信号日的 T+1 开盘买 / T+2 收盘卖回测。'));
+  if (!backtest.days || backtest.days.length === 0) {
+    patternElements.backtestGrid.appendChild(createEmptyBlock('收盘筛选完成后，这里会展示 rank1 的串行回放交易。'));
     return;
   }
 
@@ -720,45 +776,89 @@ function renderPatternBacktest(snapshot) {
     heading.className = 'stock-heading';
 
     const title = document.createElement('h4');
-    title.textContent = day.signalDate || '--';
+    title.textContent = `${day.signalDate || '--'} | ${day.name || '--'}`;
 
     const meta = document.createElement('p');
     meta.className = 'stock-code';
     meta.textContent = `${day.entryDate || '--'} 开盘买入 · ${day.exitDate || '--'} 收盘卖出`;
 
     heading.append(title, meta);
-    top.append(heading, createChangeBadge(day.portfolioReturnPercent));
+    top.append(heading, createChangeBadge(day.returnPercent));
 
     const metrics = document.createElement('div');
     metrics.className = 'stock-metrics';
     [
-      `组合收益 ${formatPercent(day.portfolioReturnPercent, 2)}`,
-      `入选股票 ${day.pickCount || 0} 只`,
-      `严格候选 ${day.strictCount || 0} 只`,
-      `可结算交易 ${day.tradeCount || 0} 笔`,
-      `剔除一字涨停 ${day.skippedLockedLimitUps || 0} 只`,
-    ].forEach((text) => {
+      `执行位次 rank${day.rank || backtest.preferredRank || 1}`,
+      `单笔收益 ${formatPercent(day.returnPercent, 2)}`,
+      `入选方式 ${day.selectionMode || '--'}`,
+      `当日候选 ${day.pickCount || 0} 只`,
+      `严格命中 ${day.strictCount || 0} 只`,
+    ].forEach((lineText) => {
       const line = document.createElement('p');
       line.className = 'metric-line';
-      line.textContent = text;
+      line.textContent = lineText;
       metrics.appendChild(line);
     });
 
-    const picks = document.createElement('div');
-    picks.className = 'tag-list';
-    (day.picks || []).forEach((pick) => {
-      const chip = document.createElement('span');
-      chip.className = `tag-pill trade-chip ${pick.returnPercent > 0 ? 'up' : pick.returnPercent < 0 ? 'down' : 'flat'}`;
-      chip.textContent = `${String(pick.rank || '--').padStart(2, '0')} ${pick.name} ${formatPercent(pick.returnPercent, 2)}`;
-      picks.appendChild(chip);
+    const tags = document.createElement('div');
+    tags.className = 'tag-list';
+    tags.appendChild(createTag(`rank${day.rank || backtest.preferredRank || 1}`));
+    tags.appendChild(createTag(day.selectionMode || 'serial'));
+
+    card.append(top, metrics, tags);
+    patternElements.backtestGrid.appendChild(card);
+  });
+}
+
+function renderPatternRankStats(snapshot) {
+  const backtest = snapshot.backtest || {};
+  patternElements.rankStatsGrid.innerHTML = '';
+
+  if (!backtest.rankStats || backtest.rankStats.length === 0) {
+    patternElements.rankStatsGrid.appendChild(createEmptyBlock('回测完成后，这里会展示 rank1 到 rank5 的分位统计。'));
+    return;
+  }
+
+  backtest.rankStats.forEach((stat) => {
+    const card = document.createElement('article');
+    card.className = 'stock-card backtest-card';
+
+    const top = document.createElement('div');
+    top.className = 'stock-top';
+
+    const heading = document.createElement('div');
+    heading.className = 'stock-heading';
+
+    const title = document.createElement('h4');
+    title.textContent = `rank${stat.rank}`;
+
+    const meta = document.createElement('p');
+    meta.className = 'stock-code';
+    meta.textContent = stat.rank === (backtest.preferredRank || 1)
+      ? '当前实盘优先位次'
+      : '相同串行规则下的备选位次';
+
+    heading.append(title, meta);
+    top.append(heading, createChangeBadge(stat.cumulativeReturnPercent));
+
+    const metrics = document.createElement('div');
+    metrics.className = 'stock-metrics';
+    [
+      `成交笔数 ${stat.totalTrades || 0}`,
+      `单笔均值 ${formatPercent(stat.averageReturnPercent, 2)}`,
+      `累计收益 ${formatPercent(stat.cumulativeReturnPercent, 2)}`,
+      `胜率 ${formatPercent(stat.tradeWinRatePercent, 2)}`,
+      `资金占用跳过 ${stat.skippedCapitalLockSignals || 0}`,
+      `一字板剔除 ${stat.skippedLockedLimitUps || 0}`,
+    ].forEach((lineText) => {
+      const line = document.createElement('p');
+      line.className = 'metric-line';
+      line.textContent = lineText;
+      metrics.appendChild(line);
     });
 
-    if (!day.picks || day.picks.length === 0) {
-      picks.appendChild(createEmptyBlock('当天没有形成可结算的回测交易。'));
-    }
-
-    card.append(top, metrics, picks);
-    patternElements.backtestGrid.appendChild(card);
+    card.append(top, metrics);
+    patternElements.rankStatsGrid.appendChild(card);
   });
 }
 
@@ -775,6 +875,7 @@ function renderPatternSnapshot(snapshot) {
   renderPatternSummary(snapshot.summary);
   renderPatternThemes(snapshot);
   renderPatternBacktest(snapshot);
+  renderPatternRankStats(snapshot);
   renderPatternPicks(snapshot);
   setPanelMessage(patternElements.warningPanel, snapshot.warnings, 'warning-line');
   renderPatternError(snapshot);
