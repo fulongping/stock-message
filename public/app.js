@@ -14,6 +14,7 @@ const marketElements = {
   coverageText: document.getElementById('marketCoverageText'),
   endText: document.getElementById('marketEndText'),
   errorPanel: document.getElementById('marketErrorPanel'),
+  fallersGrid: document.getElementById('marketFallersGrid'),
   groupsGrid: document.getElementById('marketGroupsGrid'),
   historyCountText: document.getElementById('marketHistoryCountText'),
   historyGrid: document.getElementById('marketHistoryGrid'),
@@ -404,6 +405,74 @@ function renderMarketLeaders(snapshot) {
   });
 }
 
+function renderMarketFallers(snapshot) {
+  marketElements.fallersGrid.innerHTML = '';
+
+  if (!snapshot.comparisonReady) {
+    marketElements.fallersGrid.appendChild(createEmptyBlock('等待新的 5 分钟整点快照后再统计当前 5 分钟回落最快的 5 只股票。'));
+    return;
+  }
+
+  if (!snapshot.fallers || snapshot.fallers.length === 0) {
+    marketElements.fallersGrid.appendChild(createEmptyBlock('当前 5 分钟没有可展示的回落榜。'));
+    return;
+  }
+
+  snapshot.fallers.forEach((leader) => {
+    const card = document.createElement('article');
+    card.className = 'stock-card';
+
+    const top = document.createElement('div');
+    top.className = 'stock-top';
+
+    const rank = document.createElement('span');
+    rank.className = 'stock-rank';
+    rank.textContent = String(leader.rank).padStart(2, '0');
+
+    const heading = document.createElement('div');
+    heading.className = 'stock-heading';
+
+    const name = document.createElement('h4');
+    name.textContent = leader.name;
+
+    const code = document.createElement('p');
+    code.className = 'stock-code';
+    code.textContent = `${leader.code} · ${leader.board}`;
+
+    heading.append(name, code);
+    top.append(rank, heading, createChangeBadge(leader.windowChangePercent));
+
+    const metrics = document.createElement('div');
+    metrics.className = 'stock-metrics';
+
+    [
+      `5 分钟回落 ${formatPercent(leader.windowChangePercent, 2)}`,
+      `当前价格 ${leader.price ?? '--'}`,
+      `当日涨跌 ${formatPercent(leader.dailyChangePercent, 2)}`,
+      `换手率 ${formatPercent(leader.turnoverRate, 2)}`,
+      `成交量 ${leader.volumeLabel}`,
+    ].forEach((text) => {
+      const line = document.createElement('p');
+      line.className = 'metric-line';
+      line.textContent = text;
+      metrics.appendChild(line);
+    });
+
+    const tags = document.createElement('div');
+    tags.className = 'tag-list';
+    const tagSource = leader.concepts && leader.concepts.length > 0
+      ? leader.concepts.slice(0, 4)
+      : [leader.board];
+
+    tagSource.forEach((tag) => {
+      tags.appendChild(createTag(tag));
+    });
+
+    card.append(top, metrics, tags);
+    marketElements.fallersGrid.appendChild(card);
+  });
+}
+
 function renderMarketHistory(snapshot) {
   marketElements.historyGrid.innerHTML = '';
 
@@ -477,6 +546,7 @@ function renderMarketSnapshot(snapshot) {
   renderMarketSummary(snapshot.summary);
   renderMarketGroups(snapshot);
   renderMarketLeaders(snapshot);
+  renderMarketFallers(snapshot);
   renderMarketHistory(snapshot);
   renderMarketError(snapshot);
 }

@@ -49,6 +49,7 @@ const state = {
   comparisonStartedAt: null,
   coverageCount: 0,
   error: null,
+  fallers: [],
   groups: [],
   history: [],
   historyDay: null,
@@ -108,6 +109,10 @@ function cloneState() {
     comparisonStartedAt: state.comparisonStartedAt,
     coverageCount: state.coverageCount,
     error: state.error,
+    fallers: state.fallers.map((faller) => ({
+      ...faller,
+      concepts: Array.isArray(faller.concepts) ? [...faller.concepts] : [],
+    })),
     groups: state.groups.map((group) => ({
       ...group,
       stocks: group.stocks.map((stock) => ({ ...stock })),
@@ -297,6 +302,7 @@ function resetCurrentDisplayState() {
   state.comparisonReady = false;
   state.comparisonStartedAt = null;
   state.coverageCount = 0;
+  state.fallers = [];
   state.groups = [];
   state.leaders = [];
   state.summary = [];
@@ -632,12 +638,13 @@ function buildIntervalDetails(currentSnapshot, lookbackMinutes) {
       comparisonReason: 'missing_reference_snapshot',
       comparisonStartedAt: referenceSlotDate.toISOString(),
       coverageCount: currentSnapshot.stocks.length,
+      fallers: [],
       leaders: [],
       windowMinutes: lookbackMinutes,
     };
   }
 
-  const leaders = currentSnapshot.stocks
+  const rankedStocks = currentSnapshot.stocks
     .map((stock) => {
       const previous = referenceSnapshot.universeSnapshot[stock.code];
 
@@ -662,8 +669,18 @@ function buildIntervalDetails(currentSnapshot, lookbackMinutes) {
       }
 
       return right.dailyChangePercent - left.dailyChangePercent;
-    })
+    });
+  const leaders = rankedStocks
     .slice(0, TOP_STOCK_COUNT);
+  const fallers = [...rankedStocks]
+    .sort((left, right) => {
+      if (left.windowChangePercent !== right.windowChangePercent) {
+        return left.windowChangePercent - right.windowChangePercent;
+      }
+
+      return left.dailyChangePercent - right.dailyChangePercent;
+    })
+    .slice(0, 5);
 
   return {
     comparisonEndedAt: currentSnapshot.slotEndedAt,
@@ -671,6 +688,7 @@ function buildIntervalDetails(currentSnapshot, lookbackMinutes) {
     comparisonReason: 'ready',
     comparisonStartedAt: referenceSnapshot.slotEndedAt,
     coverageCount: currentSnapshot.stocks.length,
+    fallers,
     leaders,
     windowMinutes: lookbackMinutes,
   };
@@ -727,12 +745,14 @@ function containsUnsupportedLeaderCodes(leaders) {
 }
 
 function sanitizeLoadedState() {
+  state.fallers = Array.isArray(state.fallers) ? state.fallers.filter(Boolean) : [];
   state.history = Array.isArray(state.history) ? state.history.filter(Boolean) : [];
   internalState.slotSnapshots = Array.isArray(internalState.slotSnapshots)
     ? internalState.slotSnapshots.filter((item) => item && item.slotEndedAt && item.universeSnapshot)
     : [];
 
   if (containsUnsupportedLeaderCodes(state.leaders)
+    || containsUnsupportedLeaderCodes(state.fallers)
     || state.history.some((entry) => containsUnsupportedLeaderCodes(entry.leaders || []))) {
     resetDailyMarketState(formatTradingDay(new Date()));
     return;
@@ -759,7 +779,7 @@ function buildInSessionWaitingSummary(historyCount) {
   ];
 }
 
-function buildSummary(details, groups, historyCount) {
+function buildSummary(details, groups, historyCount, fiveMinuteFallers = []) {
   if (!details.comparisonReady) {
     return [
       `${MARKET_SCOPE_LABEL}榜单只统计 ${SUPPORTED_CODE_LABEL} 开头股票，自动统计时段为 ${TRADING_SESSIONS_LABEL}。`,
@@ -792,6 +812,14 @@ function buildSummary(details, groups, historyCount) {
     lines.push(`当前主榜领涨前三分别是：${topNames}。`);
   }
 
+  if (fiveMinuteFallers.length > 0) {
+    const fastestDropNames = fiveMinuteFallers
+      .slice(0, 3)
+      .map((leader) => `${leader.name}${leader.windowChangePercent}%`)
+      .join('，');
+    lines.push(`当前 5 分钟回落最快的股票主要是：${fastestDropNames}。`);
+  }
+
   lines.push('股票分类优先使用同花顺概念题材；若概念提取失败，则回退到主板分类。');
   return lines;
 }
@@ -812,6 +840,7 @@ async function loadCache() {
     state.comparisonStartedAt = cached.comparisonStartedAt || null;
     state.coverageCount = cached.coverageCount || 0;
     state.error = cached.error || null;
+    state.fallers = Array.isArray(cached.fallers) ? cached.fallers : [];
     state.groups = Array.isArray(cached.groups) ? cached.groups : [];
     state.history = Array.isArray(cached.history) ? cached.history : [];
     state.historyDay = cached.historyDay || formatTradingDay(new Date(cached.lastSuccessAt || Date.now()));
@@ -898,7 +927,7 @@ async function refreshMarketLeaders(options = {}) {
     return cloneState();
   }
 
-  if (!scheduledAt && state.comparisonEndedAt === slotEndedAt) {
+  if (!scheduledAt && !force && state.comparisonEndedAt === slotEndedAt) {
     return cloneState();
   }
 
@@ -922,6 +951,9 @@ async function refreshMarketLeaders(options = {}) {
       const fiveMinuteLeaders = fiveMinuteDetails.comparisonReady
         ? await enrichLeaders(fiveMinuteDetails.leaders)
         : [];
+      const fiveMinuteFallers = fiveMinuteDetails.comparisonReady
+        ? await enrichLeaders(fiveMinuteDetails.fallers || [])
+        : [];
 
       if (persistHistory && fiveMinuteDetails.comparisonReady) {
         upsertHistoryEntry(buildHistoryEntry(fiveMinuteDetails, fiveMinuteLeaders));
@@ -942,12 +974,13 @@ async function refreshMarketLeaders(options = {}) {
       state.comparisonReady = displayDetails.comparisonReady;
       state.comparisonStartedAt = displayDetails.comparisonStartedAt;
       state.coverageCount = currentSnapshot.stocks.length;
+      state.fallers = fiveMinuteFallers.map(mapLeaderForState);
       state.groups = groups;
       state.historyDay = formatTradingDay(slotEndedAtDate);
       state.lastSuccessAt = currentSnapshot.capturedAt;
       state.leaders = displayLeaders.map(mapLeaderForState);
       state.status = 'ready';
-      state.summary = buildSummary(displayDetails, groups, state.history.length);
+      state.summary = buildSummary(displayDetails, groups, state.history.length, fiveMinuteFallers);
       state.windowMinutes = displayDetails.windowMinutes;
 
       internalState.historyDay = state.historyDay;
