@@ -81,6 +81,38 @@ function roundNumber(value, digits = 2) {
   return Math.round(value * factor) / factor;
 }
 
+function roundPriceToTick(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.round(value * 100) / 100;
+}
+
+function getLimitUpPrice(prevClose) {
+  if (!Number.isFinite(prevClose) || prevClose <= 0) {
+    return null;
+  }
+
+  return roundPriceToTick(prevClose * 1.1);
+}
+
+function isLockedLimitUpBar(bar) {
+  if (!bar) {
+    return false;
+  }
+
+  const limitUpPrice = getLimitUpPrice(bar.prevClose);
+  if (!Number.isFinite(limitUpPrice)) {
+    return false;
+  }
+
+  return roundPriceToTick(bar.open) >= limitUpPrice
+    && roundPriceToTick(bar.low) >= limitUpPrice
+    && roundPriceToTick(bar.high) >= limitUpPrice
+    && roundPriceToTick(bar.close) >= limitUpPrice;
+}
+
 function buildVolumeMetrics(bars, config, helpers) {
   const shortBars = bars.slice(-config.volumeShortWindow);
   const longBars = bars.slice(-config.volumeLongWindow);
@@ -417,14 +449,22 @@ function buildBacktest(candidateRecords, config, helpers) {
       }, config, helpers);
     });
     const selection = selectPicks(historicalResults, config);
-    const trades = selection.picks
+    const tradeAttempts = selection.picks
       .map((pick) => {
         const record = usableRecords.find((item) => item.candidate.code === pick.code);
         const signalIndex = record?.bars.findIndex((bar) => bar.date === signalDate) ?? -1;
         const entryBar = signalIndex >= 0 ? record.bars[signalIndex + 1] : null;
         const exitBar = signalIndex >= 0 ? record.bars[signalIndex + 2] : null;
         if (!entryBar || !exitBar || !Number.isFinite(entryBar.open) || !Number.isFinite(exitBar.close) || entryBar.open <= 0) {
-          return null;
+          return {
+            skippedReason: 'invalid_trade_window',
+          };
+        }
+
+        if (isLockedLimitUpBar(entryBar)) {
+          return {
+            skippedReason: 'locked_limit_up',
+          };
         }
 
         return {
@@ -435,11 +475,14 @@ function buildBacktest(candidateRecords, config, helpers) {
         };
       })
       .filter(Boolean);
+    const skippedLockedLimitUps = tradeAttempts.filter((item) => item.skippedReason === 'locked_limit_up').length;
+    const trades = tradeAttempts.filter((item) => !item.skippedReason);
     const portfolioReturnPercent = average(trades.map((item) => item.returnPercent));
     return {
       pickCount: selection.picks.length,
       portfolioReturnPercent: roundNumber(portfolioReturnPercent, 2),
       signalDate,
+      skippedLockedLimitUps,
       strictCount: selection.picks.filter((item) => item.selectionMode === 'strict').length,
       tradeCount: trades.length,
       trades,
@@ -450,6 +493,7 @@ function buildBacktest(candidateRecords, config, helpers) {
   const cumulativeReturnPercent = settledDays.reduce((accumulator, item) => accumulator * (1 + (item.portfolioReturnPercent / 100)), 1);
   const positiveDays = settledDays.filter((item) => item.portfolioReturnPercent > 0).length;
   const totalTrades = settledDays.reduce((sum, item) => sum + item.tradeCount, 0);
+  const totalSkippedLockedLimitUps = settledDays.reduce((sum, item) => sum + (item.skippedLockedLimitUps || 0), 0);
   const winningTrades = settledDays.reduce((sum, item) => sum + item.trades.filter((trade) => trade.returnPercent > 0).length, 0);
   const strictPickAverage = average(settledDays.map((item) => item.strictCount));
 
@@ -459,6 +503,7 @@ function buildBacktest(candidateRecords, config, helpers) {
     dayWinRatePercent: settledDays.length > 0 ? roundNumber((positiveDays / settledDays.length) * 100, 2) : null,
     signalDayCount: settledDays.length,
     strictPickAverage: roundNumber(strictPickAverage, 2),
+    totalSkippedLockedLimitUps,
     totalTrades,
     tradeWinRatePercent: totalTrades > 0 ? roundNumber((winningTrades / totalTrades) * 100, 2) : null,
   };

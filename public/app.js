@@ -1,4 +1,4 @@
-﻿const hotElements = {
+const hotElements = {
   countdownText: document.getElementById('hotCountdownText'),
   errorPanel: document.getElementById('hotErrorPanel'),
   lastAttemptText: document.getElementById('hotLastAttemptText'),
@@ -736,6 +736,7 @@ function renderPatternBacktest(snapshot) {
       `入选股票 ${day.pickCount || 0} 只`,
       `严格候选 ${day.strictCount || 0} 只`,
       `可结算交易 ${day.tradeCount || 0} 笔`,
+      `剔除一字涨停 ${day.skippedLockedLimitUps || 0} 只`,
     ].forEach((text) => {
       const line = document.createElement('p');
       line.className = 'metric-line';
@@ -1098,5 +1099,3 @@ setInterval(() => {
     signalElements.errorPanel.textContent = `状态更新失败：${error.message}`;
   });
 }, 60 * 1000);
-
-

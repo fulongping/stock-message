@@ -71,11 +71,12 @@ function createEmptyBacktest() {
   return {
     averageReturnPercent: null,
     available: false,
-    basis: '按当前筛选池回放，不追溯历史热门主题；信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出。',
+    basis: '按当前筛选池回放，不追溯历史热门主题；信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出，并剔除次日一字涨停无法买入的股票。',
     cumulativeReturnPercent: null,
     dayWinRatePercent: null,
     days: [],
     signalDayCount: BACKTEST_SIGNAL_DAY_COUNT,
+    totalSkippedLockedLimitUps: 0,
     totalTrades: 0,
     tradeWinRatePercent: null,
   };
@@ -129,6 +130,14 @@ function roundNumber(value, digits = 2) {
 
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
+}
+
+function roundPriceToTick(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.round(value * 100) / 100;
 }
 
 function formatTradingDay(date) {
@@ -634,6 +643,30 @@ function average(values) {
 
   const total = values.reduce((sum, value) => sum + value, 0);
   return total / values.length;
+}
+
+function getLimitUpPrice(prevClose) {
+  if (!Number.isFinite(prevClose) || prevClose <= 0) {
+    return null;
+  }
+
+  return roundPriceToTick(prevClose * 1.1);
+}
+
+function isLockedLimitUpBar(bar) {
+  if (!bar) {
+    return false;
+  }
+
+  const limitUpPrice = getLimitUpPrice(bar.prevClose);
+  if (!Number.isFinite(limitUpPrice)) {
+    return false;
+  }
+
+  return roundPriceToTick(bar.open) >= limitUpPrice
+    && roundPriceToTick(bar.low) >= limitUpPrice
+    && roundPriceToTick(bar.high) >= limitUpPrice
+    && roundPriceToTick(bar.close) >= limitUpPrice;
 }
 
 function calculateVolumeTrendMetrics(bars) {
@@ -1226,7 +1259,7 @@ function buildBacktestSnapshot(candidateRecords) {
       });
     });
     const selection = selectPicksFromEvaluations(historicalResults);
-    const trades = selection.picks
+    const tradeAttempts = selection.picks
       .map((pick) => {
         const record = usableRecords.find((item) => item.candidate.code === pick.code);
         if (!record) {
@@ -1237,7 +1270,15 @@ function buildBacktestSnapshot(candidateRecords) {
         const entryBar = record.bars[signalIndex + 1];
         const exitBar = record.bars[signalIndex + 2];
         if (!entryBar || !exitBar || !Number.isFinite(entryBar.open) || !Number.isFinite(exitBar.close) || entryBar.open <= 0) {
-          return null;
+          return {
+            skippedReason: 'invalid_trade_window',
+          };
+        }
+
+        if (isLockedLimitUpBar(entryBar)) {
+          return {
+            skippedReason: 'locked_limit_up',
+          };
         }
 
         return {
@@ -1252,7 +1293,10 @@ function buildBacktestSnapshot(candidateRecords) {
           selectionMode: pick.selectionMode,
         };
       })
-      .filter(Boolean)
+      .filter(Boolean);
+    const skippedLockedLimitUps = tradeAttempts.filter((item) => item.skippedReason === 'locked_limit_up').length;
+    const trades = tradeAttempts
+      .filter((item) => !item.skippedReason)
       .sort((left, right) => (left.rank || 99) - (right.rank || 99));
     const portfolioReturnPercent = average(trades.map((item) => item.returnPercent));
 
@@ -1263,6 +1307,7 @@ function buildBacktestSnapshot(candidateRecords) {
       picks: trades,
       portfolioReturnPercent: roundNumber(portfolioReturnPercent, 2),
       signalDate,
+      skippedLockedLimitUps,
       strictCount: selection.picks.filter((item) => item.selectionMode === 'strict').length,
       tradeCount: trades.length,
     };
@@ -1272,18 +1317,20 @@ function buildBacktestSnapshot(candidateRecords) {
   const cumulativeReturnPercent = settledDays.reduce((accumulator, item) => accumulator * (1 + (item.portfolioReturnPercent / 100)), 1);
   const positiveDays = settledDays.filter((item) => item.portfolioReturnPercent > 0).length;
   const totalTrades = days.reduce((sum, item) => sum + item.tradeCount, 0);
+  const totalSkippedLockedLimitUps = days.reduce((sum, item) => sum + (item.skippedLockedLimitUps || 0), 0);
   const winningTrades = days.reduce((sum, item) => sum + item.picks.filter((trade) => trade.returnPercent > 0).length, 0);
 
   return {
     averageReturnPercent: roundNumber(averageReturnPercent, 2),
     available: settledDays.length > 0,
-    basis: '按当前筛选池回放，不追溯历史热门主题；信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出。',
+    basis: '按当前筛选池回放，不追溯历史热门主题；信号日收盘选股，下一交易日开盘买入，第三交易日收盘卖出，并剔除次日一字涨停无法买入的股票。',
     cumulativeReturnPercent: roundNumber((cumulativeReturnPercent - 1) * 100, 2),
     dayWinRatePercent: settledDays.length > 0
       ? roundNumber((positiveDays / settledDays.length) * 100, 2)
       : null,
     days,
     signalDayCount: days.length,
+    totalSkippedLockedLimitUps,
     totalTrades,
     tradeWinRatePercent: totalTrades > 0
       ? roundNumber((winningTrades / totalTrades) * 100, 2)
