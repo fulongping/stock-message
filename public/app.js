@@ -647,9 +647,10 @@ function renderPatternPicks(snapshot) {
       `距 MA5 ${formatPercent(pick.aboveMa5Percent, 2)}`,
       `趋势推进 ${pick.runDays || 0} 天`,
       `震荡换手 ${pick.pullbackDays ?? 0} 天`,
-      `10日量能抬升 ${formatPercent(pick.volumeCenterLiftPercent ?? pick.volumeExpandPercent, 1)}`,
+      `${pick.volumeShortWindow || 6}日量能抬升 ${formatPercent(pick.volumeCenterLiftPercent ?? pick.volumeExpandPercent, 1)}`,
       `MA5 斜率 ${formatPercent(pick.maSlopePercent, 2)}`,
       `量能支撑 ${pick.volumeSupportDays ?? 0} 天`,
+      `短量爆发 ${formatPercent(pick.shortVolumeLiftPercent, 1)}`,
       `换手率 ${formatPercent(pick.turnoverRate, 2)}`,
     ].forEach((text) => {
       const line = document.createElement('p');
@@ -1097,4 +1098,5 @@ setInterval(() => {
     signalElements.errorPanel.textContent = `状态更新失败：${error.message}`;
   });
 }, 60 * 1000);
+
 

@@ -19,6 +19,19 @@ const CONCEPT_INDEX_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const THEME_MEMBER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const KLINE_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const MA_TOLERANCE_RATIO = 0.02;
+const VOLUME_SHORT_WINDOW = 6;
+const VOLUME_LONG_WINDOW = 10;
+const VOLUME_BURST_WINDOW = 3;
+const VOLUME_SUPPORT_THRESHOLD_RATIO = 1.03;
+const STRICT_MAX_TREND_RETURN_PERCENT = 30;
+const STRICT_MAX_BOTTOM_LIFT_PERCENT = 42;
+const STABLE_MAX_TREND_RETURN_PERCENT = 28;
+const STABLE_MAX_BOTTOM_LIFT_PERCENT = 49;
+const NEAR_MAX_TREND_RETURN_PERCENT = 38;
+const NEAR_MAX_BOTTOM_LIFT_PERCENT = 54;
+const PREFERRED_RUN_DAYS = 6;
+const PREFERRED_RUN_RETURN_PERCENT = 16;
+const PREFERRED_ABOVE_MA5_PERCENT = 3.5;
 const CONCEPT_INDEX_URL = 'https://q.10jqka.com.cn/gn/index/';
 const CONCEPT_DETAIL_BASE_URL = 'https://q.10jqka.com.cn/gn/detail/code';
 const CACHE_FILE = path.join(__dirname, 'data', 'pattern-picks-cache.json');
@@ -624,29 +637,33 @@ function average(values) {
 }
 
 function calculateVolumeTrendMetrics(bars) {
-  const recent10 = bars.slice(-10);
-  const recent20 = bars.slice(-20);
-  const volume5Avg = average(recent10.slice(-5).map((bar) => bar.volume));
-  const volume10Avg = average(recent10.map((bar) => bar.volume));
-  const volume20Avg = average(recent20.map((bar) => bar.volume));
-  const volumeSupportDays = Number.isFinite(volume20Avg)
-    ? recent10.filter((bar) => bar.volume >= volume20Avg * 1.02).length
+  const recentShort = bars.slice(-VOLUME_SHORT_WINDOW);
+  const recentLong = bars.slice(-VOLUME_LONG_WINDOW);
+  const recentBurst = recentShort.slice(-VOLUME_BURST_WINDOW);
+  const volumeBurstAvg = average(recentBurst.map((bar) => bar.volume));
+  const volumeShortAvg = average(recentShort.map((bar) => bar.volume));
+  const volumeLongAvg = average(recentLong.map((bar) => bar.volume));
+  const volumeSupportDays = Number.isFinite(volumeLongAvg)
+    ? recentShort.filter((bar) => bar.volume >= volumeLongAvg * VOLUME_SUPPORT_THRESHOLD_RATIO).length
     : 0;
-  const higherVolumeDays = recent10.slice(1).filter((bar, index) => bar.volume >= recent10[index].volume * 0.95).length;
-  const volumeCenterLiftPercent = Number.isFinite(volume10Avg) && Number.isFinite(volume20Avg) && volume20Avg > 0
-    ? ((volume10Avg - volume20Avg) / volume20Avg) * 100
+  const higherVolumeDays = recentShort.slice(1).filter((bar, index) => bar.volume >= recentShort[index].volume * 0.95).length;
+  const volumeCenterLiftPercent = Number.isFinite(volumeShortAvg) && Number.isFinite(volumeLongAvg) && volumeLongAvg > 0
+    ? ((volumeShortAvg - volumeLongAvg) / volumeLongAvg) * 100
     : null;
-  const shortVolumeLiftPercent = Number.isFinite(volume5Avg) && Number.isFinite(volume10Avg) && volume10Avg > 0
-    ? ((volume5Avg - volume10Avg) / volume10Avg) * 100
+  const shortVolumeLiftPercent = Number.isFinite(volumeBurstAvg) && Number.isFinite(volumeShortAvg) && volumeShortAvg > 0
+    ? ((volumeBurstAvg - volumeShortAvg) / volumeShortAvg) * 100
     : null;
 
   return {
     higherVolumeDays,
-    volume10Avg,
-    volume20Avg,
-    volume5Avg,
+    volumeBurstAvg,
     volumeCenterLiftPercent,
+    volumeLongAvg,
+    volumeLongWindow: VOLUME_LONG_WINDOW,
+    volumeShortAvg,
+    volumeShortWindow: VOLUME_SHORT_WINDOW,
     volumeSupportDays,
+    volumeSupportThresholdRatio: VOLUME_SUPPORT_THRESHOLD_RATIO,
     shortVolumeLiftPercent,
   };
 }
@@ -687,7 +704,7 @@ function buildPickReasons(metrics) {
   const reasons = [];
 
   if (Number.isFinite(metrics.volumeCenterLiftPercent)) {
-    reasons.push(`近 10 日量能中枢抬升 ${roundNumber(metrics.volumeCenterLiftPercent, 1)}%，量能支撑日有 ${metrics.volumeSupportDays} 天。`);
+    reasons.push(`近 ${metrics.volumeShortWindow || VOLUME_SHORT_WINDOW} 日量能相对近 ${metrics.volumeLongWindow || VOLUME_LONG_WINDOW} 日抬升 ${roundNumber(metrics.volumeCenterLiftPercent, 1)}%，量能支撑日有 ${metrics.volumeSupportDays} 天。`);
   }
 
   if (Number.isFinite(metrics.aboveMa5Percent)) {
@@ -705,7 +722,7 @@ function buildPickReasons(metrics) {
   }
 
   if (metrics.stableTrendRide) {
-    reasons.push('量能铺垫时间更长，虽然中途有一次额外震荡，但整体仍沿 MA5 稳定推进。');
+    reasons.push('量能刚从近端中枢抬起来，虽然中途有一次额外震荡，但整体仍沿 MA5 稳定推进。');
   }
 
   reasons.push(`热门主题匹配：${metrics.matchedThemes.join('、')}。`);
@@ -739,76 +756,83 @@ function evaluatePatternCandidate(candidate) {
     && maxBelowStreak < 2
     && nearAboveCount >= Math.max(recentBars.length - 3, 6)
     && maSlopePercent > 0.5
-    && maSlopePercent <= 12
+    && maSlopePercent <= 10
     && lastBar.close >= lastBar.ma5 * (1 - MA_TOLERANCE_RATIO);
   const passVolume = Number.isFinite(volumeMetrics.volumeCenterLiftPercent)
-    && volumeMetrics.volumeCenterLiftPercent >= 5
-    && volumeMetrics.volumeSupportDays >= 4;
+    && volumeMetrics.volumeCenterLiftPercent >= 2
+    && volumeMetrics.volumeSupportDays >= 4
+    && Number.isFinite(volumeMetrics.shortVolumeLiftPercent)
+    && volumeMetrics.shortVolumeLiftPercent >= 0;
   const strictStructure = Number.isFinite(progressMetrics.trendReturnPercent)
     && progressMetrics.trendReturnPercent >= 5
-    && progressMetrics.trendReturnPercent <= 40
+    && progressMetrics.trendReturnPercent <= STRICT_MAX_TREND_RETURN_PERCENT
     && Number.isFinite(progressMetrics.bottomLiftPercent)
     && progressMetrics.bottomLiftPercent >= 8
-    && progressMetrics.bottomLiftPercent <= 55
+    && progressMetrics.bottomLiftPercent <= STRICT_MAX_BOTTOM_LIFT_PERCENT
     && progressMetrics.pullbackDays <= 3;
   const stableTrendRide = recentBars.length >= 8
     && maxBelowStreak === 0
     && nearAboveCount >= Math.max(recentBars.length - 1, 8)
     && Number.isFinite(aboveMa5Percent)
     && aboveMa5Percent >= 0
-    && aboveMa5Percent <= 10
+    && aboveMa5Percent <= 9
     && maSlopePercent >= 1.5
     && maSlopePercent <= 10
     && Number.isFinite(progressMetrics.trendReturnPercent)
     && progressMetrics.trendReturnPercent >= 8
-    && progressMetrics.trendReturnPercent <= 30
+    && progressMetrics.trendReturnPercent <= STABLE_MAX_TREND_RETURN_PERCENT
     && Number.isFinite(progressMetrics.bottomLiftPercent)
     && progressMetrics.bottomLiftPercent >= 12
-    && progressMetrics.bottomLiftPercent <= 60
+    && progressMetrics.bottomLiftPercent <= STABLE_MAX_BOTTOM_LIFT_PERCENT
     && progressMetrics.pullbackDays <= 4
-    && volumeMetrics.volumeSupportDays >= 6;
+    && volumeMetrics.volumeSupportDays >= 5;
   const passDeviation = Number.isFinite(aboveMa5Percent)
     && aboveMa5Percent >= -1
-    && (aboveMa5Percent <= 8.5 || stableTrendRide);
+    && (aboveMa5Percent <= 8 || stableTrendRide);
   const passStructure = strictStructure || stableTrendRide;
   const nearTrendCandidate = recentBars.length >= 8
     && maxBelowStreak < 2
     && nearAboveCount >= Math.max(recentBars.length - 3, 6)
     && maSlopePercent > 0
-    && maSlopePercent <= 15
+    && maSlopePercent <= 12
     && Number.isFinite(aboveMa5Percent)
     && aboveMa5Percent >= -2
-    && aboveMa5Percent <= 10
+    && aboveMa5Percent <= 9
     && Number.isFinite(progressMetrics.trendReturnPercent)
     && progressMetrics.trendReturnPercent >= 3
-    && progressMetrics.trendReturnPercent <= 45
+    && progressMetrics.trendReturnPercent <= NEAR_MAX_TREND_RETURN_PERCENT
     && Number.isFinite(progressMetrics.bottomLiftPercent)
     && progressMetrics.bottomLiftPercent >= 5
-    && progressMetrics.bottomLiftPercent <= 70
+    && progressMetrics.bottomLiftPercent <= NEAR_MAX_BOTTOM_LIFT_PERCENT
     && progressMetrics.pullbackDays <= 4
-    && ((Number.isFinite(volumeMetrics.volumeCenterLiftPercent) && volumeMetrics.volumeCenterLiftPercent >= 0)
+    && ((Number.isFinite(volumeMetrics.volumeCenterLiftPercent) && volumeMetrics.volumeCenterLiftPercent >= -2)
       || volumeMetrics.volumeSupportDays >= 3);
-  const passTrendPush = nearTrendCandidate
-    && Number.isFinite(aboveMa5Percent)
-    && aboveMa5Percent <= 6.5
-    && maSlopePercent <= 10;
-  const passed = passDeviation && passVolume && passStructure && (passMa || passTrendPush);
+  const passed = passDeviation && passVolume && passStructure && passMa;
   const themeScore = candidate.themeRankScore || 0;
   const dailyChangePercent = Number.isFinite(candidate.dailyChangePercent)
     ? candidate.dailyChangePercent
     : getDailyChangePercent(lastBar);
   const deviationPenalty = Number.isFinite(aboveMa5Percent)
-    ? Math.abs(aboveMa5Percent - 5)
+    ? Math.abs(aboveMa5Percent - PREFERRED_ABOVE_MA5_PERCENT)
     : 20;
+  const runPenalty = Number.isFinite(progressMetrics.advanceDays)
+    ? Math.abs(progressMetrics.advanceDays - PREFERRED_RUN_DAYS)
+    : 5;
+  const runReturnPenalty = Number.isFinite(progressMetrics.trendReturnPercent)
+    ? Math.abs(progressMetrics.trendReturnPercent - PREFERRED_RUN_RETURN_PERCENT)
+    : 15;
   const score = (themeScore * 8)
     + (nearAboveCount * 4)
     + ((volumeMetrics.volumeSupportDays || 0) * 3)
     + Math.min(progressMetrics.trendReturnPercent || 0, 25)
-    + ((volumeMetrics.volumeCenterLiftPercent || 0) / 2)
+    + (volumeMetrics.volumeCenterLiftPercent || 0)
+    + (volumeMetrics.shortVolumeLiftPercent || 0)
     + (dailyChangePercent || 0)
     - (deviationPenalty * 2)
+    - (runPenalty * 1.5)
+    - (runReturnPenalty * 0.5)
     - (Math.max(maSlopePercent - 8, 0) * 1.5)
-    - (Math.max((progressMetrics.bottomLiftPercent || 0) - 45, 0) * 0.6);
+    - (Math.max((progressMetrics.bottomLiftPercent || 0) - STRICT_MAX_BOTTOM_LIFT_PERCENT, 0) * 1.2);
 
   const metrics = {
     aboveMa5Percent: roundNumber(aboveMa5Percent, 2),
@@ -829,11 +853,13 @@ function evaluatePatternCandidate(candidate) {
     stableTrendRide,
     themeRankScore: themeScore,
     turnoverRate: roundNumber(candidate.turnoverRate, 2),
-    volume10Avg: roundNumber(volumeMetrics.volume10Avg, 0),
-    volume20Avg: roundNumber(volumeMetrics.volume20Avg, 0),
-    volume5Avg: roundNumber(volumeMetrics.volume5Avg, 0),
+    shortVolumeLiftPercent: roundNumber(volumeMetrics.shortVolumeLiftPercent, 1),
     volumeCenterLiftPercent: roundNumber(volumeMetrics.volumeCenterLiftPercent, 1),
     volumeExpandPercent: roundNumber(volumeMetrics.volumeCenterLiftPercent || 0, 1),
+    volumeLongAvg: roundNumber(volumeMetrics.volumeLongAvg, 0),
+    volumeLongWindow: volumeMetrics.volumeLongWindow,
+    volumeShortAvg: roundNumber(volumeMetrics.volumeShortAvg, 0),
+    volumeShortWindow: volumeMetrics.volumeShortWindow,
     volumeSupportDays: volumeMetrics.volumeSupportDays,
   };
 
@@ -1041,12 +1067,19 @@ function sortStrictMatches(left, right) {
     return (right.themeRankScore || 0) - (left.themeRankScore || 0);
   }
 
-  if ((right.runDays || 0) !== (left.runDays || 0)) {
-    return (right.runDays || 0) - (left.runDays || 0);
+  const leftFreshnessPenalty = Math.abs((left.runDays || 0) - PREFERRED_RUN_DAYS)
+    + (Math.abs((left.runReturnPercent || 0) - PREFERRED_RUN_RETURN_PERCENT) / 6)
+    + (Math.abs((left.aboveMa5Percent || 0) - PREFERRED_ABOVE_MA5_PERCENT) / 2);
+  const rightFreshnessPenalty = Math.abs((right.runDays || 0) - PREFERRED_RUN_DAYS)
+    + (Math.abs((right.runReturnPercent || 0) - PREFERRED_RUN_RETURN_PERCENT) / 6)
+    + (Math.abs((right.aboveMa5Percent || 0) - PREFERRED_ABOVE_MA5_PERCENT) / 2);
+
+  if (leftFreshnessPenalty !== rightFreshnessPenalty) {
+    return leftFreshnessPenalty - rightFreshnessPenalty;
   }
 
-  if ((right.runReturnPercent || 0) !== (left.runReturnPercent || 0)) {
-    return (right.runReturnPercent || 0) - (left.runReturnPercent || 0);
+  if ((right.volumeSupportDays || 0) !== (left.volumeSupportDays || 0)) {
+    return (right.volumeSupportDays || 0) - (left.volumeSupportDays || 0);
   }
 
   return (right.score || 0) - (left.score || 0);
@@ -1069,8 +1102,8 @@ function sortReserveMatches(left, right) {
     return (right.themeRankScore || 0) - (left.themeRankScore || 0);
   }
 
-  const leftDeviation = Math.abs((left.aboveMa5Percent ?? 99) - 5);
-  const rightDeviation = Math.abs((right.aboveMa5Percent ?? 99) - 5);
+  const leftDeviation = Math.abs((left.aboveMa5Percent ?? 99) - PREFERRED_ABOVE_MA5_PERCENT);
+  const rightDeviation = Math.abs((right.aboveMa5Percent ?? 99) - PREFERRED_ABOVE_MA5_PERCENT);
   if (leftDeviation !== rightDeviation) {
     return leftDeviation - rightDeviation;
   }
@@ -1263,7 +1296,7 @@ function buildWaitingSummary(referenceDate = new Date()) {
   return [
     `收盘复盘会在交易日 ${pad2(closeTime.getHours())}:${pad2(closeTime.getMinutes())} 后生成。`,
     '筛选范围只保留 00 / 60 开头股票，并且要求属于同花顺当日前五大热门主题。',
-    '模式条件为：近 10 日量能中枢抬升、沿 MA5 稳定推进、允许少量震荡换手，但最近没有连续两天跌破 MA5，且收盘不要离 5 日线太远。',
+    '模式条件为：近 6 日量能相对近 10 日明显抬升、沿 MA5 稳定推进、允许少量震荡换手，但最近没有连续两天跌破 MA5，且收盘不要离 5 日线太远。',
   ];
 }
 
@@ -1285,7 +1318,7 @@ function buildSummary(context) {
   }
 
   lines.push(`前五热门主题共整理出 ${context.themeMemberCount} 只 00 / 60 主板成分股，并优先评估其中 ${context.candidateCount} 只。`);
-  lines.push(`严格满足“量能中枢抬升 + 沿 MA5 稳定推进 + 允许少量震荡换手 + 乖离不过大”的股票共有 ${context.strictMatchCount} 只，当前展示前 ${context.finalPickCount} 只。`);
+  lines.push(`严格满足“近端量能刚抬升 + 沿 MA5 稳定推进 + 允许少量震荡换手 + 乖离不过大”的股票共有 ${context.strictMatchCount} 只，当前展示前 ${context.finalPickCount} 只。`);
 
   if (context.marketOverview.available && context.marketOverview.latestLeaders.length > 0) {
     const names = context.marketOverview.latestLeaders
