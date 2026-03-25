@@ -26,6 +26,7 @@ const AFTERNOON_SESSION_START_MINUTES = 13 * 60;
 const AFTERNOON_SESSION_END_MINUTES = 15 * 60;
 const CACHE_FILE = path.join(__dirname, 'data', 'market-leaders-cache.json');
 const SUPPORTED_CODE_PATTERN = /^(60|00)/;
+const ST_NAME_PATTERN = /(?:^|\b)\*?ST/i;
 const SESSION_START_MINUTES = new Set([
   MORNING_SESSION_START_MINUTES,
   AFTERNOON_SESSION_START_MINUTES,
@@ -341,6 +342,10 @@ function inferBoardLabel(code) {
   return '其他板块';
 }
 
+function isEligibleStockName(name = '') {
+  return !ST_NAME_PATTERN.test(String(name || '').trim());
+}
+
 function normalizeRankStock(rawItem) {
   const code = String(rawItem['5'] || '').trim();
   const name = String(rawItem['55'] || '').trim();
@@ -349,7 +354,7 @@ function normalizeRankStock(rawItem) {
   const turnoverRate = parseNumber(rawItem['1968584']);
   const volume = parseNumber(rawItem['13']);
 
-  if (!code || !name || !Number.isFinite(price) || !SUPPORTED_CODE_PATTERN.test(code)) {
+  if (!code || !name || !Number.isFinite(price) || !SUPPORTED_CODE_PATTERN.test(code) || !isEligibleStockName(name)) {
     return null;
   }
 
@@ -744,12 +749,48 @@ function containsUnsupportedLeaderCodes(leaders) {
   return leaders.some((leader) => !SUPPORTED_CODE_PATTERN.test(String(leader.code || '')));
 }
 
+function sanitizeRankedStocks(stocks) {
+  return (Array.isArray(stocks) ? stocks : [])
+    .filter((stock) => stock
+      && SUPPORTED_CODE_PATTERN.test(String(stock.code || ''))
+      && isEligibleStockName(stock.name))
+    .map((stock, index) => ({
+      ...stock,
+      rank: index + 1,
+    }));
+}
+
+function sanitizeGroupEntries(groups) {
+  return (Array.isArray(groups) ? groups : [])
+    .map((group) => ({
+      ...group,
+      count: sanitizeRankedStocks(group.stocks).length,
+      stocks: sanitizeRankedStocks(group.stocks),
+    }))
+    .filter((group) => group.stocks.length > 0);
+}
+
+function sanitizeHistoryEntries(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .map((entry) => {
+      const leaders = sanitizeRankedStocks(entry.leaders);
+      return {
+        ...entry,
+        leaders,
+        topLeader: leaders.length > 0 ? { ...leaders[0] } : null,
+      };
+    })
+    .filter((entry) => entry.leaders.length > 0);
+}
+
 function sanitizeLoadedState() {
-  state.fallers = Array.isArray(state.fallers) ? state.fallers.filter(Boolean) : [];
-  state.history = Array.isArray(state.history) ? state.history.filter(Boolean) : [];
+  state.fallers = sanitizeRankedStocks(state.fallers);
+  state.groups = sanitizeGroupEntries(state.groups);
+  state.history = sanitizeHistoryEntries(state.history);
   internalState.slotSnapshots = Array.isArray(internalState.slotSnapshots)
     ? internalState.slotSnapshots.filter((item) => item && item.slotEndedAt && item.universeSnapshot)
     : [];
+  state.leaders = sanitizeRankedStocks(state.leaders);
 
   if (containsUnsupportedLeaderCodes(state.leaders)
     || containsUnsupportedLeaderCodes(state.fallers)

@@ -895,6 +895,7 @@ async function buildCandidatePool(topThemes, marketSnapshot) {
           turnoverRate: marketInfo?.turnoverRate ?? null,
         };
       })
+      .filter((item) => isEligibleStock(item.code, item.name))
       .sort(sortByMarketStrength)
       .slice(0, MAX_THEME_CANDIDATES);
 
